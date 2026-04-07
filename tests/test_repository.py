@@ -1,0 +1,189 @@
+"""REQ-012 v2 — Unit tests for the Repository class.
+
+Uses an in-memory SQLite database via the tmp_path fixture. Verifies the v2
+schema (no events / pending_events tables, no topic_subscriptions / auto_respond
+columns, new groups.workflow_id column, AgentRole.orchestrator support, and
+SchemaIncompatibleError detection).
+"""
+import pytest
+import pytest_asyncio
+from pathlib import Path
+
+from agent_management.backend.models import (
+    Agent,
+    AgentRole,
+    AgentStatus,
+    Group,
+    Session,
+)
+from agent_management.backend.repository import Repository, SchemaIncompatibleError
+from agent_management.shared.config import SCHEMA_VERSION
+
+
+@pytest_asyncio.fixture
+async def repo(tmp_path: Path):
+    r = Repository(db_path=tmp_path / "test.db")
+    await r.init()
+    yield r
+    await r.close()
+
+
+class TestSchemaVersion:
+    async def test_fresh_db_writes_current_schema_version(self, tmp_path: Path):
+        r = Repository(db_path=tmp_path / "fresh.db")
+        await r.init()
+        try:
+            actual = await r._read_schema_version()
+            assert actual == SCHEMA_VERSION
+        finally:
+            await r.close()
+
+    async def test_mismatched_db_raises(self, tmp_path: Path):
+        # Create a db, downgrade its schema_version, then re-open
+        db_path = tmp_path / "stale.db"
+        r1 = Repository(db_path=db_path)
+        await r1.init()
+        await r1._set_schema_version(SCHEMA_VERSION - 1)
+        await r1._conn.commit()
+        await r1.close()
+
+        r2 = Repository(db_path=db_path)
+        with pytest.raises(SchemaIncompatibleError) as exc:
+            await r2.init()
+        assert exc.value.expected == SCHEMA_VERSION
+        assert exc.value.actual == SCHEMA_VERSION - 1
+
+
+class TestAgentCRUD:
+    async def test_save_and_get_agent(self, repo: Repository):
+        agent = Agent(name="PM", role=AgentRole.product_manager, working_dir="/tmp")
+        await repo.save_agent(agent)
+        fetched = await repo.get_agent(agent.id)
+        assert fetched is not None
+        assert fetched.name == "PM"
+        assert fetched.role == AgentRole.product_manager
+
+    async def test_save_orchestrator_agent(self, repo: Repository):
+        agent = Agent(name="Orch", role=AgentRole.orchestrator, working_dir="/tmp")
+        await repo.save_agent(agent)
+        fetched = await repo.get_agent(agent.id)
+        assert fetched.role == AgentRole.orchestrator
+
+    async def test_update_agent_status(self, repo: Repository):
+        agent = Agent(name="Dev", role=AgentRole.developer, working_dir="/tmp")
+        await repo.save_agent(agent)
+        await repo.update_agent_status(agent.id, AgentStatus.active)
+        fetched = await repo.get_agent(agent.id)
+        assert fetched.status == AgentStatus.active
+
+    async def test_delete_agent(self, repo: Repository):
+        agent = Agent(name="X", role=AgentRole.developer, working_dir="/tmp")
+        await repo.save_agent(agent)
+        await repo.delete_agent(agent.id)
+        assert await repo.get_agent(agent.id) is None
+
+
+class TestGroupCRUD:
+    async def test_save_group_with_workflow(self, repo: Repository):
+        group = Group(name="g1", workflow_id="prototype")
+        await repo.save_group(group)
+        fetched = await repo.get_group(group.id)
+        assert fetched is not None
+        assert fetched.workflow_id == "prototype"
+
+    async def test_default_workflow_is_standard(self, repo: Repository):
+        group = Group(name="g2")
+        await repo.save_group(group)
+        fetched = await repo.get_group(group.id)
+        assert fetched.workflow_id == "standard"
+
+    async def test_set_workflow_id(self, repo: Repository):
+        group = Group(name="g3")
+        await repo.save_group(group)
+        await repo.set_workflow_id(group.id, "research")
+        fetched = await repo.get_group(group.id)
+        assert fetched.workflow_id == "research"
+
+
+class TestGroupMembership:
+    async def test_get_orchestrator_for_group(self, repo: Repository):
+        group = Group(name="g")
+        await repo.save_group(group)
+        pm = Agent(name="PM", role=AgentRole.product_manager, working_dir="/tmp")
+        orch = Agent(name="Orch", role=AgentRole.orchestrator, working_dir="/tmp")
+        await repo.save_agent(pm)
+        await repo.save_agent(orch)
+        await repo.add_group_member(group.id, pm.id)
+        await repo.add_group_member(group.id, orch.id)
+
+        found = await repo.get_orchestrator_for_group(group.id)
+        assert found is not None
+        assert found.id == orch.id
+
+    async def test_get_workers_for_group_excludes_orchestrator(self, repo: Repository):
+        group = Group(name="g")
+        await repo.save_group(group)
+        pm = Agent(name="PM", role=AgentRole.product_manager, working_dir="/tmp")
+        orch = Agent(name="Orch", role=AgentRole.orchestrator, working_dir="/tmp")
+        await repo.save_agent(pm)
+        await repo.save_agent(orch)
+        await repo.add_group_member(group.id, pm.id)
+        await repo.add_group_member(group.id, orch.id)
+
+        workers = await repo.get_workers_for_group(group.id)
+        assert len(workers) == 1
+        assert workers[0].id == pm.id
+
+
+class TestSessionCRUD:
+    async def test_save_and_get_session(self, repo: Repository):
+        # Create the parent rows so the FK constraint is satisfied
+        agent = Agent(name="A", role=AgentRole.developer, working_dir="/tmp")
+        await repo.save_agent(agent)
+        group = Group(name="G")
+        await repo.save_group(group)
+
+        sess = Session(agent_id=agent.id, group_id=group.id, tmux_pane_id="%42")
+        await repo.save_session(sess)
+        fetched = await repo.get_session(agent.id, group.id)
+        assert fetched is not None
+        assert fetched.tmux_pane_id == "%42"
+
+
+class TestRoleTemplates:
+    async def test_orchestrator_template_present(self, repo: Repository):
+        prompt = await repo.get_orchestrator_template()
+        assert "{{WORKFLOW_DEFINITION}}" in prompt
+        assert "{{WORKER_ROSTER}}" in prompt
+        assert "<<DISPATCH" in prompt
+        assert "TASK_DONE" in prompt
+
+    async def test_all_roles_have_templates(self, repo: Repository):
+        templates = await repo.get_role_templates()
+        roles = {t.role for t in templates}
+        # All canonical roles should have templates
+        assert AgentRole.orchestrator in roles
+        assert AgentRole.product_manager in roles
+        assert AgentRole.developer in roles
+        assert AgentRole.tester in roles
+        assert AgentRole.user in roles
+
+    async def test_worker_templates_mention_task_done(self, repo: Repository):
+        templates = await repo.get_role_templates()
+        for tpl in templates:
+            if tpl.role in (AgentRole.custom,):
+                continue
+            assert "<<TASK_DONE>>" in tpl.system_prompt, (
+                f"{tpl.role.value} template missing <<TASK_DONE>> instruction"
+            )
+
+    async def test_worker_templates_no_mcp_references(self, repo: Repository):
+        """REQ-012 v2 F-05: ensure no MCP / event-bus relics remain."""
+        templates = await repo.get_role_templates()
+        forbidden = ["publish_event", "get_pending_events", "PENDING EVENTS",
+                     "MCP_SERVER_URL", "AGENT_ID", "GROUP_ID"]
+        for tpl in templates:
+            for bad in forbidden:
+                assert bad not in tpl.system_prompt, (
+                    f"{tpl.role.value} template still references '{bad}'"
+                )
