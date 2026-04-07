@@ -197,14 +197,15 @@ class Repository:
   text 内可以使用 \\" 转义双引号。
 
 - 平台会捕获这个 block，把 text 内容发送给对应下属的终端。
-- 然后你需要等待平台返回一段:
+- 下属收到后会执行任务，并在最后一行输出完成标记 {{COMPLETION_MARKER}}。
+- 你会看到平台返回一段:
 
   [WORKER_RESULT role="developer" via="marker"]
   ...下属的输出...
   [/WORKER_RESULT]
 
   这就是该下属的工作成果。via 标注完成是怎么检测到的:
-  marker = 下属正常输出了完成标记
+  marker = 下属正常输出了 {{COMPLETION_MARKER}} 标记
   silence = 下属沉默超时（产物可能不完整）
   stall = 平台强制推进（产物可能严重不完整）
 
@@ -222,7 +223,7 @@ class Repository:
 
 ## 硬性规则
 - 一次只能 dispatch 一个角色，必须等到 [WORKER_RESULT] 才能 dispatch 下一个。
-- text 字段不能包含字符串 <<TASK_DONE>>、<<WORKFLOW_COMPLETE>> 或 <<WORKFLOW_ABORT —— 这些是平台控制标记。
+- text 字段不能包含字符串 {{COMPLETION_MARKER}}、<<WORKFLOW_COMPLETE>> 或 <<WORKFLOW_ABORT —— 这些是平台控制标记。
 - 工作流完成后只输出 <<WORKFLOW_COMPLETE>>，不要再 dispatch。
 - 不要伪造 [WORKER_RESULT]，那只能由平台注入。
 - 不要解释你的内部思考；直接产出 dispatch block 或 workflow 控制标记。

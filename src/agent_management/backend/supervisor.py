@@ -89,13 +89,6 @@ class WorkflowAborted(Message):
     reason: str
 
 
-@dataclass
-class PaneOutputRefresh(Message):
-    """Trigger a pane output refresh in the TUI."""
-    agent_id: str
-    pane_id: str
-
-
 # ------------------------------------------------------------------
 # In-flight dispatch tracking
 # ------------------------------------------------------------------
@@ -129,7 +122,13 @@ class Supervisor:
         self._stall_notified: bool = False
         self._force_advance_request: Optional[asyncio.Event] = None
         self._abort_request: Optional[asyncio.Event] = None
-        self._consumed_offset: int = 0
+        # REQ-014 F-01: replace byte-offset bookkeeping with content-signature dedup.
+        # Byte offsets break when tmux scrollback truncates the pane: the stored
+        # offset ends up past the start of the captured text and every subsequent
+        # dispatch is silently skipped. Signature dedup is robust to any truncation
+        # because we always search the full captured text.
+        self._last_dispatch_raw: Optional[str] = None
+        self._workflow_ended: bool = False
         self._step_index: int = 0
         self._dev_tester_retries: int = 0  # for the standard workflow's failure loop
 
@@ -142,7 +141,8 @@ class Supervisor:
         logger.info("Starting group %s", group_id)
         await self._cancel_dispatch_loop()
         self._active_group_id = group_id
-        self._consumed_offset = 0
+        self._last_dispatch_raw = None
+        self._workflow_ended = False
         self._step_index = 0
         self._dev_tester_retries = 0
         self._stall_notified = False
@@ -201,7 +201,8 @@ class Supervisor:
         logger.info("Resuming group %s", group_id)
         await self._cancel_dispatch_loop()
         self._active_group_id = group_id
-        self._consumed_offset = 0
+        self._last_dispatch_raw = None
+        self._workflow_ended = False
         self._step_index = 0
         self._dev_tester_retries = 0
 
@@ -298,6 +299,15 @@ class Supervisor:
             workflow = None
         step_total = len(workflow.steps) if workflow else 0
 
+        # REQ-014 F-04: pull the tester step's max_retries from the workflow for
+        # the soft-cap warning log. Defaults to 0 (no cap) if no tester step.
+        tester_max_retries = 0
+        if workflow:
+            for step in workflow.steps:
+                if step.on_failure_marker == "<<TESTS_FAILED>>":
+                    tester_max_retries = step.max_retries
+                    break
+
         in_flight: Optional[_InFlight] = None
 
         try:
@@ -316,19 +326,32 @@ class Supervisor:
                     if not pane_text:
                         continue
 
-                    if orch_mod.is_workflow_complete(pane_text, self._consumed_offset):
+                    # REQ-014 F-01: workflow-end is sticky once seen. If for any
+                    # reason we exit and re-enter the loop after a complete/abort,
+                    # we never re-process it.
+                    if self._workflow_ended:
+                        return
+
+                    if orch_mod.is_workflow_complete(pane_text):
                         logger.info("dispatch_loop: <<WORKFLOW_COMPLETE>> seen for group=%s", group_id)
+                        self._workflow_ended = True
                         self._app.post_message(WorkflowCompleted(group_id=group_id))
                         return
-                    abort_reason = orch_mod.is_workflow_abort(pane_text, self._consumed_offset)
+                    abort_reason = orch_mod.is_workflow_abort(pane_text)
                     if abort_reason:
                         logger.info("dispatch_loop: <<WORKFLOW_ABORT>> for group=%s reason=%s",
                                     group_id, abort_reason)
+                        self._workflow_ended = True
                         self._app.post_message(WorkflowAborted(group_id=group_id, reason=abort_reason))
                         return
 
-                    dispatch = orch_mod.parse_latest_dispatch(pane_text, self._consumed_offset)
+                    # REQ-014 F-01: parse the latest dispatch across the full
+                    # captured text, then skip if it's the same one we already
+                    # processed (content-signature dedup, scrollback-safe).
+                    dispatch = orch_mod.parse_latest_dispatch(pane_text)
                     if dispatch is None:
+                        continue
+                    if dispatch.raw == self._last_dispatch_raw:
                         continue
 
                     # Validate dispatch text doesn't contain forbidden markers
@@ -336,7 +359,7 @@ class Supervisor:
                     if err:
                         logger.warning("dispatch rejected: %s", err)
                         await self._sm.send_keys(orch_pane, f"[PLATFORM_ERROR: {err}]")
-                        self._consumed_offset = dispatch.end_offset
+                        self._last_dispatch_raw = dispatch.raw
                         continue
 
                     # Resolve target worker
@@ -346,7 +369,7 @@ class Supervisor:
                         msg = f"unknown role '{dispatch.role}' — valid roles: {', '.join(valid)}"
                         logger.warning("dispatch rejected: %s", msg)
                         await self._sm.send_keys(orch_pane, f"[PLATFORM_ERROR: {msg}]")
-                        self._consumed_offset = dispatch.end_offset
+                        self._last_dispatch_raw = dispatch.raw
                         continue
 
                     worker_session = await self._repo.get_session(worker.id, group_id)
@@ -354,7 +377,7 @@ class Supervisor:
                         msg = f'role="{dispatch.role}" reason="pane not active"'
                         logger.warning("dispatch rejected: worker %s not active", worker.name)
                         await self._sm.send_keys(orch_pane, f"[WORKER_ERROR {msg}]")
-                        self._consumed_offset = dispatch.end_offset
+                        self._last_dispatch_raw = dispatch.raw
                         continue
 
                     # Send the dispatch text to the worker
@@ -369,7 +392,7 @@ class Supervisor:
                         last_pane_text="",
                         step_index=self._step_index,
                     )
-                    self._consumed_offset = dispatch.end_offset
+                    self._last_dispatch_raw = dispatch.raw
                     self._stall_notified = False
                     if self._force_advance_request:
                         self._force_advance_request.clear()
@@ -380,6 +403,24 @@ class Supervisor:
                     continue
 
                 # ---- in_flight: poll the worker pane ----
+                # REQ-014 F-03: check for pane vanish before reading content, so
+                # that a killed worker pane produces a distinct WORKER_ERROR
+                # rather than waiting for the 60s silence timeout to fire with
+                # an empty artifact.
+                if not await self._sm.pane_exists(in_flight.worker_pane):
+                    logger.warning(
+                        "dispatch_loop: worker pane vanished group=%s role=%s pane=%s",
+                        group_id, in_flight.dispatch.role, in_flight.worker_pane,
+                    )
+                    await self._sm.send_keys(
+                        orch_pane,
+                        f'[WORKER_ERROR role="{in_flight.dispatch.role}" '
+                        f'reason="pane vanished"]',
+                    )
+                    in_flight = None
+                    self._stall_notified = False
+                    continue
+
                 worker_text = await self._sm.capture_pane_full(in_flight.worker_pane)
                 now = asyncio.get_event_loop().time()
                 if worker_text != in_flight.last_pane_text:
@@ -443,7 +484,11 @@ class Supervisor:
                     group_id, in_flight.dispatch.role, via, len(result.artifact),
                 )
 
-                # Tester failure-loop bookkeeping (only meaningful for the standard workflow)
+                # Tester failure-loop bookkeeping (only meaningful for the standard workflow).
+                # REQ-014 F-04: emit a warning log when the retry count exceeds the
+                # soft cap declared by the workflow step's max_retries. Hard
+                # enforcement stays in the orchestrator's prompt by design — the
+                # platform warns but does not abort the workflow.
                 if (
                     workflow
                     and result.tests_failed
@@ -451,10 +496,17 @@ class Supervisor:
                     and in_flight.dispatch.role == AgentRole.tester.value
                 ):
                     self._dev_tester_retries += 1
-                    logger.info(
-                        "dispatch_loop: tester reported failures, retry #%d",
-                        self._dev_tester_retries,
-                    )
+                    if tester_max_retries and self._dev_tester_retries > tester_max_retries:
+                        logger.warning(
+                            "dispatch_loop: tester failure retry #%d exceeds soft cap %d "
+                            "group=%s — workflow should abort according to its own rules",
+                            self._dev_tester_retries, tester_max_retries, group_id,
+                        )
+                    else:
+                        logger.info(
+                            "dispatch_loop: tester reported failures, retry #%d",
+                            self._dev_tester_retries,
+                        )
 
                 self._app.post_message(WorkflowStepAdvanced(
                     group_id=group_id,
