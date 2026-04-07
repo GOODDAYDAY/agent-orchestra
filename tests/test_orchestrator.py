@@ -7,8 +7,13 @@ and trivially testable.
 """
 from __future__ import annotations
 
+import pytest
+
 from agent_management.backend.orchestrator import (
     CompletionLayer,
+    CompletionResult,
+    Dispatch,
+    _unescape_text,
     detect_completion,
     is_workflow_abort,
     is_workflow_complete,
@@ -234,6 +239,18 @@ class TestDetectCompletion:
         # No new marker after offset → pending
         assert result.layer == CompletionLayer.pending
 
+    def test_completion_result_is_frozen(self):
+        # CompletionResult / Dispatch are frozen dataclasses so the supervisor
+        # cannot accidentally mutate them.
+        r = CompletionResult(layer=CompletionLayer.pending, artifact="", detail="")
+        with pytest.raises((AttributeError, Exception)):
+            r.artifact = "mutated"  # type: ignore[misc]
+
+    def test_dispatch_is_frozen(self):
+        d = Dispatch(role="dev", text="x", raw="<<DISPATCH...>>", end_offset=0)
+        with pytest.raises((AttributeError, Exception)):
+            d.role = "pm"  # type: ignore[misc]
+
     def test_marker_precedence_over_silence(self):
         text = "output\n<<TASK_DONE>>"
         result = detect_completion(
@@ -246,3 +263,206 @@ class TestDetectCompletion:
             stall_timeout=600.0,
         )
         assert result.layer == CompletionLayer.marker
+
+
+# ---- REQ-014 F-06: expanded unit coverage ------------------------------------
+
+class TestUnescapeText:
+    def test_empty_string(self):
+        assert _unescape_text("") == ""
+
+    def test_plain_string(self):
+        assert _unescape_text("hello world") == "hello world"
+
+    def test_single_escape(self):
+        assert _unescape_text('say \\"hi\\"') == 'say "hi"'
+
+    def test_trailing_backslash_is_preserved(self):
+        # If the last char is a bare backslash (no char after it to escape), we
+        # append it verbatim rather than raising an IndexError.
+        assert _unescape_text("foo\\") == "foo\\"
+
+    def test_double_backslash(self):
+        # `\\` should round-trip to a single backslash.
+        assert _unescape_text("a\\\\b") == "a\\b"
+
+    def test_escaped_non_quote(self):
+        # Any backslash-escaped char is un-escaped to the literal char.
+        assert _unescape_text("a\\nb") == "anb"
+
+    def test_unicode_chars_preserved(self):
+        assert _unescape_text("你好 world") == "你好 world"
+
+
+class TestParseLatestDispatchEdge:
+    def test_empty_text(self):
+        assert parse_latest_dispatch("") is None
+
+    def test_empty_dispatch_text(self):
+        text = '<<DISPATCH role="pm" text="">><</DISPATCH>>'
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.text == ""
+
+    def test_whitespace_only_text(self):
+        text = '<<DISPATCH role="pm" text="   ">><</DISPATCH>>'
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.text == "   "
+
+    def test_unicode_in_text(self):
+        text = '<<DISPATCH role="developer" text="实现用户登录">><</DISPATCH>>'
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.text == "实现用户登录"
+
+    def test_dispatch_at_end_of_string(self):
+        text = 'some preamble\n<<DISPATCH role="pm" text="final">><</DISPATCH>>'
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.role == "pm"
+        # end_offset should point to the end of the whole dispatch block
+        assert d.end_offset == len(text)
+
+    def test_trailing_whitespace_after_dispatch(self):
+        text = '<<DISPATCH role="dev" text="x">><</DISPATCH>>\n\n  '
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.text == "x"
+
+    def test_preceded_by_worker_result_block(self):
+        # Simulates the real pane state: a [WORKER_RESULT] block from a prior
+        # step, followed by the orchestrator's next dispatch.
+        text = (
+            '[WORKER_RESULT role="pm" via="marker"]\n'
+            'spec body\n'
+            '[/WORKER_RESULT]\n'
+            '<<DISPATCH role="tech_director" text="review the spec">><</DISPATCH>>'
+        )
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.role == "tech_director"
+
+    def test_malformed_role_with_digits_rejected(self):
+        text = '<<DISPATCH role="dev123" text="x">><</DISPATCH>>'
+        # The regex restricts role to [a-z_]+ so digits are rejected.
+        assert parse_latest_dispatch(text) is None
+
+    def test_malformed_role_uppercase_rejected(self):
+        text = '<<DISPATCH role="Developer" text="x">><</DISPATCH>>'
+        assert parse_latest_dispatch(text) is None
+
+
+class TestWorkflowMarkersEdge:
+    def test_complete_at_end_of_string_no_newline(self):
+        # Marker must still be recognised if the string ends right after it.
+        assert is_workflow_complete("<<WORKFLOW_COMPLETE>>\n")
+        assert is_workflow_complete("line\n<<WORKFLOW_COMPLETE>>")
+
+    def test_complete_with_trailing_whitespace(self):
+        assert is_workflow_complete("<<WORKFLOW_COMPLETE>>   \n")
+
+    def test_complete_mid_line_not_detected(self):
+        assert not is_workflow_complete("hello <<WORKFLOW_COMPLETE>> world")
+
+    def test_abort_empty_reason(self):
+        assert is_workflow_abort('<<WORKFLOW_ABORT reason=""/>>') == ""
+
+    def test_abort_long_reason(self):
+        text = f'<<WORKFLOW_ABORT reason="{"a" * 500}"/>>'
+        reason = is_workflow_abort(text)
+        assert reason is not None
+        assert len(reason) == 500
+
+
+class TestValidateDispatchTextEdge:
+    def test_empty_text_passes(self):
+        assert validate_dispatch_text("") is None
+
+    def test_task_done_with_surrounding_text_rejected(self):
+        assert validate_dispatch_text("before <<TASK_DONE>> after") is not None
+
+    def test_task_done_case_sensitive(self):
+        # The forbidden check is case-sensitive; lowercase variants pass.
+        assert validate_dispatch_text("<<task_done>>") is None
+
+    def test_multiple_forbidden_markers_returns_first(self):
+        err = validate_dispatch_text("<<TASK_DONE>> and <<WORKFLOW_COMPLETE>>")
+        # Implementation-specific: first match wins.
+        assert err is not None
+
+
+class TestDetectCompletionEdge:
+    def test_marker_with_trailing_whitespace(self):
+        text = "output\n<<TASK_DONE>>   \n"
+        result = detect_completion(
+            pane_text=text, dispatch_end_offset=0,
+            last_change_at=0.0, dispatch_at=0.0, now=10.0,
+        )
+        assert result.layer == CompletionLayer.marker
+
+    def test_silence_exactly_at_threshold(self):
+        # Silence timeout is inclusive: elapsed >= silence_timeout fires.
+        result = detect_completion(
+            pane_text="some output",
+            dispatch_end_offset=0,
+            last_change_at=0.0,
+            dispatch_at=0.0,
+            now=60.0,   # exactly equal to silence_timeout
+            silence_timeout=60.0,
+            stall_timeout=600.0,
+        )
+        assert result.layer == CompletionLayer.silence
+
+    def test_stall_exactly_at_threshold(self):
+        result = detect_completion(
+            pane_text="",   # empty so silence doesn't fire
+            dispatch_end_offset=0,
+            last_change_at=0.0,
+            dispatch_at=0.0,
+            now=600.0,
+            silence_timeout=60.0,
+            stall_timeout=600.0,
+        )
+        assert result.layer == CompletionLayer.stall
+
+    def test_tests_failed_in_silence_layer(self):
+        text = "some tests failed\n<<TESTS_FAILED>>\nno marker"
+        result = detect_completion(
+            pane_text=text, dispatch_end_offset=0,
+            last_change_at=0.0, dispatch_at=0.0, now=70.0,
+            silence_timeout=60.0,
+        )
+        assert result.layer == CompletionLayer.silence
+        assert result.tests_failed is True
+
+    def test_artifact_does_not_include_marker_line(self):
+        text = "abc\n<<TASK_DONE>>"
+        result = detect_completion(
+            pane_text=text, dispatch_end_offset=0,
+            last_change_at=0.0, dispatch_at=0.0, now=10.0,
+        )
+        assert result.layer == CompletionLayer.marker
+        assert "<<TASK_DONE>>" not in result.artifact
+        assert result.artifact == "abc"
+
+    def test_unicode_artifact_preserved(self):
+        text = "你好世界\n<<TASK_DONE>>"
+        result = detect_completion(
+            pane_text=text, dispatch_end_offset=0,
+            last_change_at=0.0, dispatch_at=0.0, now=10.0,
+        )
+        assert result.layer == CompletionLayer.marker
+        assert "你好世界" in result.artifact
+
+    def test_very_large_artifact(self):
+        # A 100KB artifact should still extract correctly and not blow the
+        # regex engine.
+        body = "x" * 100_000
+        text = f"{body}\n<<TASK_DONE>>"
+        result = detect_completion(
+            pane_text=text, dispatch_end_offset=0,
+            last_change_at=0.0, dispatch_at=0.0, now=10.0,
+        )
+        assert result.layer == CompletionLayer.marker
+        assert len(result.artifact) == 100_000

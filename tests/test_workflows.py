@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from agent_management.backend.models import AgentRole
-from agent_management.backend import workflows
+from agent_management.backend import workflows  # noqa: F401
 
 
 class TestBuiltInWorkflows:
@@ -103,3 +103,80 @@ class TestRendering:
         # other roles appear in roster but not in step lines.
         assert "1. developer" in rendered
         assert "2. user" in rendered
+
+
+# ---- REQ-014 F-06: expanded coverage ----------------------------------------
+
+class TestWorkflowStability:
+    def _roster(self):
+        return [
+            (AgentRole.product_manager, "PM", "%1"),
+            (AgentRole.tech_director, "TD", "%2"),
+            (AgentRole.developer, "Dev", "%3"),
+            (AgentRole.tester, "Tester", "%4"),
+            (AgentRole.user, "User", "%5"),
+        ]
+
+    def test_render_is_idempotent(self):
+        r1 = workflows.render_for_orchestrator(workflows.STANDARD, self._roster())
+        r2 = workflows.render_for_orchestrator(workflows.STANDARD, self._roster())
+        assert r1 == r2
+
+    def test_render_roster_is_idempotent(self):
+        r1 = workflows.render_roster(self._roster())
+        r2 = workflows.render_roster(self._roster())
+        assert r1 == r2
+
+    def test_step_is_frozen(self):
+        step = workflows.STANDARD.steps[0]
+        with pytest.raises((AttributeError, Exception)):
+            step.role = AgentRole.developer  # type: ignore[misc]
+
+    def test_workflow_is_frozen(self):
+        with pytest.raises((AttributeError, Exception)):
+            workflows.STANDARD.id = "tampered"  # type: ignore[misc]
+
+
+class TestFailureLoopMetadata:
+    def test_standard_failure_loop_target_is_valid_step_index(self):
+        wf = workflows.STANDARD
+        for idx, step in enumerate(wf.steps):
+            if step.failure_loop_to is not None:
+                assert 0 <= step.failure_loop_to < len(wf.steps)
+
+    def test_standard_failure_loop_target_role_matches_marker_source(self):
+        # The tester's failure loop should target a Developer step so that the
+        # Dev↔Tester feedback loop makes sense.
+        wf = workflows.STANDARD
+        tester_step = next(s for s in wf.steps if s.role == AgentRole.tester)
+        assert tester_step.failure_loop_to is not None
+        target = wf.steps[tester_step.failure_loop_to]
+        assert target.role == AgentRole.developer
+
+    def test_prototype_has_no_failure_loops(self):
+        for step in workflows.PROTOTYPE.steps:
+            assert step.on_failure_marker is None
+            assert step.failure_loop_to is None
+
+    def test_research_has_no_failure_loops(self):
+        for step in workflows.RESEARCH.steps:
+            assert step.on_failure_marker is None
+            assert step.failure_loop_to is None
+
+    def test_max_retries_is_non_negative(self):
+        for wf in workflows.BUILT_IN_WORKFLOWS.values():
+            for step in wf.steps:
+                assert step.max_retries >= 0
+
+
+class TestRequiredRolesConsistency:
+    def test_required_roles_equals_distinct_step_roles(self):
+        # The set returned by required_roles must match the set of distinct
+        # roles referenced across all steps.
+        for wf in workflows.BUILT_IN_WORKFLOWS.values():
+            expected = {step.role for step in wf.steps}
+            assert workflows.required_roles(wf) == expected
+
+    def test_all_built_ins_reachable_via_get_workflow(self):
+        for wf_id in workflows.BUILT_IN_WORKFLOWS:
+            assert workflows.get_workflow(wf_id) is workflows.BUILT_IN_WORKFLOWS[wf_id]
