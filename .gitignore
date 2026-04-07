@@ -1,0 +1,77 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+*.whl
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ===== Virtual environments =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== Testing / Coverage =====
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# ===== IDE / Editors =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ===== Windows =====
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.stackdump
+
+# ===== Logs & temp =====
+*.log
+logs/
+*.tmp
+*.temp
+*.bak
+*.pid
+
+# ===== Secrets / local config =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.*
+
+# ===== Project-specific =====
+.agent_management/
+.claude/
+.DS_Store

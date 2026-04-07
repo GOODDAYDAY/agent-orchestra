@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-management"
+version = "0.1.0"
+description = "Multi-agent Claude Code CLI orchestration platform"
+requires-python = ">=3.13"
+dependencies = [
+    "textual>=1.0.0",
+    "aiosqlite>=0.20.0",
+]
+
+[project.scripts]
+agent-mgmt = "agent_management.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_management"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-mock>=3.14.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
