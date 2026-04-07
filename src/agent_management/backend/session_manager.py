@@ -249,16 +249,18 @@ class SessionManager:
         # 4. Resolve effective system prompt.
         # REQ-012 v2: orchestrator agents get the rendered template; workers get
         # their stored prompt verbatim. No identity block is prepended to anyone.
+        tmp_prompt_path: Optional[Path] = None
         if agent.role == AgentRole.orchestrator:
             effective_prompt = await self._render_orchestrator_prompt(agent, group_id)
-            tmp_prompt = TEMP_DIR / f"orch_prompt_{agent.id[:8]}.txt"
-            tmp_prompt.write_text(effective_prompt, encoding="utf-8")
+            tmp_prompt_path = TEMP_DIR / f"orch_prompt_{agent.id[:8]}.txt"
+            tmp_prompt_path.write_text(effective_prompt, encoding="utf-8")
             try:
-                tmp_prompt.chmod(0o600)
+                tmp_prompt_path.chmod(0o600)
             except OSError:
                 pass
-            cmd_parts += ["--system-prompt-file", str(tmp_prompt)]
-            logger.debug("Orchestrator prompt rendered, agent_id=%s, tmp=%s", agent.id, tmp_prompt)
+            cmd_parts += ["--system-prompt-file", str(tmp_prompt_path)]
+            logger.debug("Orchestrator prompt rendered, agent_id=%s, tmp=%s",
+                         agent.id, tmp_prompt_path)
         elif agent.system_prompt:
             cmd_parts += ["--system-prompt", agent.system_prompt]
         elif agent.system_prompt_file:
@@ -291,6 +293,20 @@ class SessionManager:
 
         # 6. Poll for readiness (F-04 — load-bearing in v2)
         await self._wait_for_pane_ready(agent, pane_id, session)
+
+        # REQ-014 F-02: schedule deletion of the rendered orchestrator prompt
+        # tmp file so it does not leak across group restarts. 30 seconds gives
+        # Claude CLI plenty of time to read the file during startup before we
+        # wipe it. Cleanup is best-effort.
+        if tmp_prompt_path is not None:
+            try:
+                asyncio.get_running_loop().call_later(
+                    30.0, _cleanup_temp, tmp_prompt_path,
+                )
+            except RuntimeError:
+                # No running loop (e.g. called from a sync context in a test);
+                # attempt immediate cleanup instead.
+                _cleanup_temp(tmp_prompt_path)
 
         logger.info(
             "Agent %s session started: pane=%s session_id=%s status=%s",
