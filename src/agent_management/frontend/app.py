@@ -434,7 +434,9 @@ class AgentManagementApp(App):
     async def on_agent_pane_attach_requested(
         self, message: AgentPane.AttachRequested
     ) -> None:
-        """Entry point for F-01–F-07: validate → detect env → attach → refresh."""
+        """Entry point for the Enter button attach flow — validate group, resolve
+        session, validate pane, detect tmux environment, dispatch to the correct
+        attach path, show result toast, refresh pane."""
         self.run_worker(
             self._handle_attach(message.agent_id),
             name=f"attach-{message.agent_id}",
@@ -542,16 +544,7 @@ class AgentManagementApp(App):
         # Restore terminal rendering after resume (AC-09)
         self.refresh(layout=True)
         await self._reset_terminal()
-
-        # Check MCP/SSE health after event loop suspension (F-04/AC-08)
-        if result.need_mcp_check:
-            self._check_mcp_alive()
-
         return result
-
-    def _check_mcp_alive(self) -> None:
-        """REQ-012 v2: MCP server removed; this is a no-op kept for callsite compatibility."""
-        return None
 
     async def _confirm_concurrent_access(self) -> bool:
         """Show a confirmation dialog for F-05 concurrent access and return the user's choice."""
