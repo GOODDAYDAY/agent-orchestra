@@ -1,0 +1,59 @@
+@startuml
+skinparam componentStyle rectangle
+skinparam backgroundColor #FAFAFA
+skinparam component {
+  BackgroundColor #E8F4FD
+  BorderColor #2980B9
+}
+skinparam package {
+  BackgroundColor #FFF9E6
+  BorderColor #F39C12
+}
+skinparam note {
+  BackgroundColor #FFFDE7
+  BorderColor #F9A825
+}
+
+package "frontend/" {
+  [agent_pane.py\n+ AttachRequested msg\n+ Enter button] as AgentPane
+  [app.py\n+ on_attach_requested\n+ _do_grouped_attach\n+ _do_suspend_attach\n+ _check_mcp_alive] as App
+  [tmux_attach.py (new)\ngrouped_attach()\nsuspend_attach()\ncleanup_stale_sessions()\ncleanup_all_sessions()] as TmuxAttach
+  [dialogs.py\nConfirmDeleteDialog] as Dialogs
+}
+
+package "backend/" {
+  [mcp_server.py\nFastMCP SSE :8765] as MCP
+  [session_manager.py\nSession.tmux_pane_id] as SM
+}
+
+package "shared/" {
+  [config.py\nTEMP_DIR] as Config
+}
+
+package "OS / tmux" {
+  [tmux server\nagmgr-enter-{id}-{pid}] as Tmux
+  [Sentinel file\nTEMP_DIR/attach_sentinel_*.txt] as Sentinel
+}
+
+AgentPane --> App : AttachRequested(agent_id)
+App --> TmuxAttach : grouped_attach() / suspend_attach()
+App --> Dialogs : concurrent access confirm
+App --> MCP : _check_mcp_alive() probe
+TmuxAttach --> Tmux : new-session / switch-client\nset-hook / kill-session
+TmuxAttach --> Sentinel : write / unlink (suspend path)
+TmuxAttach --> Config : TEMP_DIR
+App --> SM : get session → tmux_pane_id
+
+note right of TmuxAttach
+  Pure async functions
+  _runner param injection
+  for testability
+end note
+
+note right of App
+  Grouped path: asyncio loop
+  stays live (SSE unaffected)
+  Suspend path: loop suspended
+  briefly; MCP checked on resume
+end note
+@enduml

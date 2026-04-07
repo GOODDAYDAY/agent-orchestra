@@ -1,0 +1,70 @@
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+
+actor "Platform Operator" as operator
+actor "Workflow Observer" as observer
+actor "Manual Fallback User" as fallback
+
+rectangle "REQ-012 v2 — LLM Orchestrator Replaces Event Bus" {
+  (Create Group with Workflow) as UC1
+  (Start Group) as UC2
+  (Observe Workflow Progress) as UC3
+  (Attach to Pane) as UC4
+  (View Actionable Error Message) as UC5
+  (Force Advance Stalled Worker) as UC6
+  (Abort Workflow) as UC7
+  (Acknowledge Schema Reset Modal) as UC8
+}
+
+operator --> UC1
+operator --> UC2
+operator --> UC4
+operator --> UC5
+operator --> UC8
+
+observer --> UC3
+observer --> UC4
+
+fallback --> UC6
+fallback --> UC7
+fallback --> UC4
+
+UC1 ..> UC2 : precedes
+UC2 ..> UC3 : enables
+UC3 ..> UC6 : on stall
+UC3 ..> UC7 : on stall
+
+note right of UC1
+  Workflow dropdown:
+  - standard (PM->TD->Dev->Tester->User)
+  - prototype (Dev->User)
+  - research (PM->TD->User)
+  REQ-009 auto-creates 6 agents
+  including Orchestrator (F-11)
+end note
+
+note right of UC2
+  Workers start first; orchestrator
+  starts last after all workers
+  reach 'active' (F-04)
+end note
+
+note right of UC3
+  Orchestrator pane shows the live
+  workflow state; AgentPane badges
+  show "current step" (F-07/F-08)
+end note
+
+note right of UC6
+  Triggered by ORCHESTRATOR_STALL_TIMEOUT
+  (default 10 min) after dispatch with
+  no completion signal (F-09 tertiary)
+end note
+
+note bottom of UC8
+  First-run after upgrade: schema
+  version mismatch -> destructive
+  reset of .agent_management/ (Section 4)
+end note
+@enduml

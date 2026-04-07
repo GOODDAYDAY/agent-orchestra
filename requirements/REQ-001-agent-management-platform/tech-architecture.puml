@@ -1,0 +1,65 @@
+@startuml tech-architecture
+skinparam componentStyle uml2
+skinparam backgroundColor White
+
+package "agent_management (Python Process)" {
+  package "frontend/" {
+    [AgentManagementApp\napp.py] as APP
+    [AgentPane\nagent_pane.py] as APANE
+    [EventLog\nevent_log.py] as ELOG
+    [GroupPanel\ngroup_panel.py] as GPANEL
+    [Dialogs\ndialogs.py] as DLG
+  }
+
+  package "backend/" {
+    [Supervisor\nsupervisor.py\n(Textual Worker)] as SUP
+    [SessionManager\nsession_manager.py] as SM
+    [MCPServer\nmcp_server.py\n(FastMCP SSE :8765)] as MCP
+    [Repository\nrepository.py\n(aiosqlite)] as REPO
+    [Models\nmodels.py] as MDL
+  }
+
+  package "shared/" {
+    [Config\nconfig.py\nDB_PATH, MCP_PORT\nCLAUDE_CMD] as CFG
+  }
+}
+
+database "~/.agent_management/state.db\n(WAL mode)" as DB
+
+package "tmux session: agent-mgmt-<gid>" {
+  [Pane: PM-Agent\nclaude --dangerously-skip-permissions\n--session-id <uuid> --mcp-config] as P1
+  [Pane: Dev-Agent] as P2
+  [Pane: Tester-Agent] as P3
+}
+
+APP --> APANE : compose()
+APP --> ELOG : compose()
+APP --> GPANEL : compose()
+APP --> DLG : push_screen()
+APP --> SUP : run_worker()
+APP --> MCP : start_server()
+APP --> REPO : init_db()
+
+SUP --> REPO : read events\nwrite delivered
+SUP --> SM : start/stop/send_keys
+SUP --> APP : post_message()\nEventPublished\nAgentStatusChanged
+
+SM --> P1 : tmux send-keys
+SM --> P2 : tmux send-keys
+SM --> P3 : tmux send-keys
+SM --> REPO : save_session()
+
+MCP --> REPO : insert_event()
+MCP <-- P1 : publish_event() MCP call
+MCP <-- P2 : publish_event() MCP call
+MCP <-- P3 : publish_event() MCP call
+
+REPO --> DB : aiosqlite
+
+MDL --> REPO : used by
+MDL --> SUP : used by
+MDL --> MCP : used by
+CFG --> SM : CLAUDE_CMD
+CFG --> REPO : DB_PATH
+CFG --> MCP : MCP_PORT
+@enduml

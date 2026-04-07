@@ -1,0 +1,78 @@
+@startuml
+start
+
+:User clicks Enter on AgentPane;
+:Disable Enter button;
+
+if (Agent has active tmux pane?) then (no)
+  :Toast: "Agent has no active pane";
+  :Re-enable button;
+  stop
+endif
+
+:Detect environment\n($TMUX + display-message);
+
+if (Nested tmux?) then (yes)
+  :Toast: "Nested tmux not supported";
+  :Re-enable button;
+  stop
+endif
+
+if (In tmux?) then (yes)
+
+  :Generate grouped session name\nagmgr-enter-{agent_id[:8]};
+
+  if (Session exists with client?) then (yes)
+    :Show confirmation dialog\n"Already accessed, enter anyway?";
+    if (User confirms?) then (no)
+      :Re-enable button;
+      stop
+    endif
+  endif
+
+  :Create grouped session\ntmux new-session -t agent_session;
+  :Register client-detached hook\n(kill if last client);
+  :tmux switch-client → grouped session;
+  :Toast: "Attached — Ctrl+B D to return";
+
+  note right
+    TUI continues running
+    asyncio loop not suspended
+    MCP SSE unaffected
+  end note
+
+else (no)
+
+  :Set _mcp_reconnect_needed if SSE active;
+  :app.suspend();
+  :tmux attach-session (blocking);
+
+  note right
+    User interacts with agent pane
+    asyncio loop suspended
+    SSE connection may time out
+  end note
+
+  :app.resume();
+  :app.refresh(layout=True) + tput reset;
+
+  if (_mcp_reconnect_needed?) then (yes)
+    :Check SSE connection;
+    if (Disconnected?) then (yes)
+      :Toast: "Reconnecting MCP...";
+      :Reconnect SSE (timeout 10 s);
+      if (Reconnect fails?) then (yes)
+        :Toast: "MCP reconnection failed";
+        :Mark agents degraded;
+      endif
+    endif
+  endif
+
+endif
+
+:Force capture-pane poll for agent;
+:Refresh agent status in TUI;
+:Re-enable Enter button;
+
+stop
+@enduml

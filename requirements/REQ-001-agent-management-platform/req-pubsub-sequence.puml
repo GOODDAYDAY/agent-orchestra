@@ -1,0 +1,55 @@
+@startuml req-pubsub-sequence
+skinparam sequenceMessageAlign center
+skinparam backgroundColor White
+
+participant "PM-Agent\n(Claude CLI in tmux)" as PM
+participant "agent-bus\nMCP Server" as MCP
+participant "Supervisor\n(asyncio loop)" as SUP
+participant "SQLite\n(events table)" as DB
+participant "Dev-Agent\n(auto_respond=True)" as DEV
+participant "Test-Agent\n(auto_respond=False,\npaused=False)" as TEST
+participant "TUI Event Log" as LOG
+
+PM -> MCP : MCP tool call:\npublish_event("spec.completed", payload)
+MCP -> DB : INSERT INTO events\n(topic, payload, source, group_id, ts)
+MCP --> PM : {event_id: "uuid", status: "ok"}
+
+loop every 250ms
+  SUP -> DB : SELECT undelivered events\nWHERE delivered=0
+  DB --> SUP : [event: spec.completed]
+end
+
+SUP -> DB : UPDATE event SET delivered=1
+SUP -> LOG : push event to TUI display
+LOG --> SUP : rendered
+
+group Fan-out to subscribers
+  SUP -> DEV : tmux send-keys\n"[AGENT_MSG from PM-Agent | spec.completed]: <payload>"
+  note right of DEV
+    auto_respond=True:
+    message delivered immediately
+    Claude processes and begins work
+  end note
+
+  SUP -> DB : INSERT pending_event\n(agent=Test-Agent, event_id=uuid)
+  note right of TEST
+    auto_respond=False:
+    event buffered in pending_events queue
+    TUI badge shows "1 pending event"
+    User must manually deliver
+  end note
+end
+
+DEV -> MCP : MCP tool call:\npublish_event("code.ready", code_summary)
+MCP -> DB : INSERT INTO events (code.ready)
+note over TEST
+  Test-Agent is subscribed to "code.ready"
+  Event queued as 2nd pending event
+  Badge shows "2 pending events"
+end note
+
+== User manually delivers pending events to Test-Agent ==
+
+SUP -> TEST : tmux send-keys\n(drains pending_events in order)
+TEST -> MCP : MCP tool call:\npublish_event("test.started", "Running tests...")
+@enduml

@@ -1,0 +1,62 @@
+@startuml
+title REQ-012 v2 — Enter Button Flow (F-03 Pane Routing, F-06 Toasts)
+
+actor User
+participant "AgentPane\n(TUI)" as pane_widget
+participant "App\n_handle_attach()" as app
+participant "tmux_attach\ngrouped_attach()" as attach
+participant "tmux" as tmux
+
+note over User, tmux
+  In v2 the target pane may belong to either a worker
+  (PM/TD/Dev/Tester/User) OR the orchestrator. The
+  routing path is identical for all six panes.
+end note
+
+User -> pane_widget : clicks Enter button\n(target agent, status=active)
+pane_widget -> pane_widget : disable button\nset 5s re-enable timer
+pane_widget -> app : AttachRequested(agent_id)
+
+app -> app : F-06 check: active group selected?
+alt no group selected
+  app -> User : toast "Select a group first"
+  app -> pane_widget : re-enable Enter
+  return
+end
+
+app -> app : _resolve_agent_session()
+alt session record missing
+  app -> User : toast "Agent session not started — use Start Group"
+  app -> pane_widget : re-enable Enter
+  return
+end
+
+app -> app : validate_pane_exists(session.tmux_pane_id)
+alt pane gone (tmux killed it)
+  app -> User : toast "Agent pane is gone — restart the agent"
+  app -> pane_widget : re-enable Enter
+  return
+end
+
+app -> app : detect_environment() -> IN_TMUX
+app -> attach : grouped_attach(\n  agent_id,\n  tmux_session_name,\n  pane_id="%N",\n  app_pid=...)
+
+attach -> tmux : new-session -d -s "agmgr-enter-PID"\n  -t parent_session
+attach -> tmux : switch-client -t "agmgr-enter-PID"
+attach -> tmux : select-pane -t "%N"\n[F-03: ensures correct pane focus]
+attach -> tmux : set-hook client-detached ...
+attach --> app : AttachResult(ok=True)
+
+app -> pane_widget : re-enable Enter button
+app -> User : toast "Attached — Ctrl+B D to return"
+
+note over User
+  User is now viewing the chosen pane
+  (worker or orchestrator).
+  REQ-013's scrollbar fix and quick-actions
+  apply orthogonally.
+end note
+
+User -> tmux : Ctrl+B D  (detach)
+tmux -> tmux : hook fires: kill grouped session
+@enduml

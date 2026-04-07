@@ -1,0 +1,90 @@
+@startuml
+skinparam sequenceMessageAlign center
+skinparam backgroundColor #FAFAFA
+
+title REQ-011 Attach Flows
+
+actor "Platform User" as User
+participant "AgentPane" as Pane
+participant "App" as App
+participant "tmux_attach.py" as TA
+participant "tmux server" as Tmux
+participant "MCP/SSE" as MCP
+
+== In-tmux Path (Grouped Session — asyncio stays live) ==
+
+User -> Pane : click Enter
+Pane -> Pane : disable button\nstart 5s force-reenable timer
+Pane -> App : AttachRequested(agent_id)
+App -> Tmux : list-panes (validate)
+Tmux --> App : pane exists ✓
+App -> App : detect env\n($TMUX + display-message)
+App -> App : path = IN_TMUX
+App -> TA : grouped_attach(agent_id, pane_id, pid)
+TA -> Tmux : list-clients (concurrent check)
+alt another client attached
+  Tmux --> TA : client list
+  TA --> App : need_confirm=True
+  App -> User : ConfirmDeleteDialog
+  User -> App : confirm
+end
+TA -> Tmux : new-session -d -s agmgr-enter-{id}-{pid}\n-t {agent_session}
+TA -> Tmux : select-window
+TA -> Tmux : set-hook client-detached\n(kill-if-last script)
+TA -> Tmux : switch-client -t agmgr-enter-{id}-{pid}
+Tmux --> User : terminal switches to agent pane
+App -> User : toast "Attached — Ctrl+B D to return"
+
+note over App, MCP
+  asyncio event loop continues
+  MCP/SSE connections unaffected
+  TUI keeps polling capture-pane
+end note
+
+User -> Tmux : Ctrl+B D (detach)
+Tmux -> Tmux : client-detached hook fires\n→ kill-session (async)
+App -> Tmux : force capture-pane poll
+App -> Pane : refresh output + status
+Pane -> Pane : re-enable Enter button
+
+== Out-of-tmux Path (Suspend + Attach) ==
+
+User -> Pane : click Enter
+Pane -> App : AttachRequested(agent_id)
+App -> App : detect env: $TMUX absent\npath = OUT_OF_TMUX
+App -> TA : suspend_attach(pane_id, pid, suspend_fn)
+TA -> TA : asyncio.sleep(0)\n(drain pending callbacks)
+TA -> TA : write sentinel file
+TA -> App : call suspend_fn()
+App -> App : app.suspend()\n(releases terminal control)
+App --> User : terminal available
+TA -> Tmux : subprocess.run(attach-session) [blocking]
+Tmux --> User : terminal attached to agent pane
+
+note over App, MCP
+  asyncio event loop SUSPENDED
+  MCP/SSE connections may time out
+  Textual workers paused
+end note
+
+User -> Tmux : Ctrl+B D
+Tmux --> TA : subprocess.run returns
+TA -> TA : sentinel.unlink()
+App -> App : app.resume()\ntput reset
+App -> MCP : _check_mcp_alive() probe
+alt MCP task done/cancelled
+  App -> User : toast "MCP connection lost,\nplease restart"
+end
+App -> Tmux : force capture-pane poll
+App -> Pane : refresh output + status
+Pane -> Pane : re-enable Enter button
+
+== Startup Cleanup ==
+
+App -> TA : cleanup_stale_sessions(current_pid)
+TA -> Tmux : list-sessions (filter agmgr-enter-*)
+loop stale session (pid not alive)
+  TA -> Tmux : kill-session
+end
+
+@enduml

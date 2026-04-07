@@ -1,0 +1,52 @@
+@startuml req-session-lifecycle
+skinparam backgroundColor White
+skinparam state {
+  BackgroundColor LightBlue
+  BorderColor Navy
+  FontColor Black
+  ArrowColor DarkBlue
+}
+
+[*] --> not_started : Agent created\n(no tmux pane, no Claude session)
+
+not_started --> starting : User starts group\nor individual agent\n[pre-assign session UUID]
+
+starting --> active : Claude CLI ready\nin tmux pane\n[session UUID stored in SQLite]
+
+starting --> degraded : Claude fails to start\nwithin 3 seconds\n[exit code non-zero]
+
+active --> paused : User clicks Pause (P)\nor agent calls pause_agent()\n[pub/sub events buffered ≤ 50]
+
+paused --> active : User clicks Resume (R)\n[drain pending_events in order]
+
+active --> stopping : User stops agent\nor Group Stop All\nor session exits normally\n[Stop hook fires → publishes agent.stopped]
+
+stopping --> stopped : Claude exits cleanly\nor tmux kill-pane after 5s timeout\n[session status updated in SQLite]
+
+stopped --> starting : User restarts agent\nor Group Resume\n[use --resume <uuid> if session ID valid]
+
+degraded --> starting : User clicks Re-attach / Restart
+
+active --> degraded : tmux pane lost externally\n(killed outside platform)\n[supervisor detects missing pane]
+
+note right of active
+  pub/sub events delivered
+  claude --session-id <uuid> running
+  tmux capture-pane refresh active
+  MCP tools available to agent
+end note
+
+note right of paused
+  Claude session still running
+  User can type directly in pane
+  Pub/sub events buffered (max 50)
+  MCP publish_event still works
+end note
+
+note right of stopped
+  tmux pane destroyed
+  Session UUID preserved in SQLite
+  Resume will use --resume <uuid>
+  Or start fresh if UUID expired
+end note
+@enduml

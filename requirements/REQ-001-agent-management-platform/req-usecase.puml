@@ -1,0 +1,38 @@
+@startuml req-usecase
+left to right direction
+skinparam packageStyle rectangle
+skinparam actorStyle awesome
+
+actor User as U
+actor "Platform\n(Supervisor)" as P
+
+rectangle "Agent Management Platform" {
+  usecase "UC-01\nCreate / Configure Agent" as UC01
+  usecase "UC-02\nCreate Group & Add Agents" as UC02
+  usecase "UC-03\nStart Group Session" as UC03
+  usecase "UC-04\nPublish Event" as UC04
+  usecase "UC-05\nReceive & Act on Event" as UC05
+  usecase "UC-06\nPause Agent Messages" as UC06
+  usecase "UC-07\nConfigure System Context" as UC07
+  usecase "Resume Prior Session" as R01
+  usecase "Start Fresh Session" as R02
+  usecase "Buffer Pending Events" as B01
+  usecase "Inject via tmux send-keys" as INJ
+}
+
+U --> UC01
+U --> UC02
+U --> UC03
+U --> UC04 : manual trigger
+U --> UC06
+U --> UC07
+
+P --> UC04 : auto-detect Stop hook
+P --> UC05
+
+UC03 ..> R01 : <<extends>>
+UC03 ..> R02 : <<extends>>
+UC04 ..> UC05 : <<triggers>>
+UC05 ..> B01 : <<extends>>\nauto_respond=False or paused
+UC05 ..> INJ : <<extends>>\nauto_respond=True
+@enduml

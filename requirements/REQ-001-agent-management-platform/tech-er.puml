@@ -1,0 +1,75 @@
+@startuml tech-er
+skinparam backgroundColor White
+
+entity "agents" as AGT {
+  * id : TEXT <<PK>>
+  --
+  * name : TEXT
+  * role : TEXT
+  * working_dir : TEXT
+  system_prompt : TEXT
+  system_prompt_file : TEXT
+  topic_subscriptions : TEXT  /' JSON array '/
+  * auto_respond : INTEGER  /' 0|1 '/
+  * paused : INTEGER  /' 0|1 '/
+  * status : TEXT
+  * created_at : TEXT
+  * updated_at : TEXT
+}
+
+entity "groups" as GRP {
+  * id : TEXT <<PK>>
+  --
+  * name : TEXT
+  * created_at : TEXT
+}
+
+entity "group_members" as GM {
+  * group_id : TEXT <<FK>>
+  * agent_id : TEXT <<FK>>
+}
+
+entity "sessions" as SES {
+  * id : TEXT <<PK>>
+  --
+  * agent_id : TEXT <<FK>>
+  * group_id : TEXT <<FK>>
+  claude_session_id : TEXT  /' pre-assigned UUID '/
+  previous_session_id : TEXT
+  tmux_session_name : TEXT
+  tmux_pane_id : TEXT
+  * status : TEXT
+  started_at : TEXT
+  stopped_at : TEXT
+}
+
+entity "events" as EVT {
+  * id : TEXT <<PK>>
+  --
+  * group_id : TEXT <<FK>>
+  * source_agent_id : TEXT <<FK>>
+  * topic : TEXT
+  * payload : TEXT
+  metadata : TEXT  /' JSON '/
+  * timestamp : TEXT
+  * delivered : INTEGER  /' 0|1 '/
+}
+
+entity "pending_events" as PE {
+  * id : TEXT <<PK>>
+  --
+  * agent_id : TEXT <<FK>>
+  * event_id : TEXT <<FK>>
+  * delivered : INTEGER  /' 0|1 '/
+  * created_at : TEXT
+}
+
+AGT ||--o{ GM : "belongs to"
+GRP ||--o{ GM : "has members"
+AGT ||--o{ SES : "has sessions"
+GRP ||--o{ SES : "within group"
+GRP ||--o{ EVT : "scoped to"
+AGT ||--o{ EVT : "source of"
+AGT ||--o{ PE : "receives"
+EVT ||--o{ PE : "buffered as"
+@enduml

@@ -1,0 +1,39 @@
+@startuml
+left to right direction
+
+actor "Platform User" as User
+actor "tmux Server" as Tmux
+
+rectangle "Agent Management Platform" {
+  usecase "Click Enter on AgentPane" as UC01
+  usecase "Detect tmux Environment" as UC02
+  usecase "Enter via Grouped Session\n(in-tmux path)" as UC03
+  usecase "Enter via Suspend+Attach\n(out-of-tmux path)" as UC04
+  usecase "Check Concurrent Access" as UC05
+  usecase "Return to TUI\n(Ctrl+B D)" as UC06
+  usecase "Reconnect MCP/SSE\nafter resume" as UC07
+  usecase "Cleanup Orphan Sessions\non startup" as UC08
+}
+
+User --> UC01
+UC01 --> UC02
+UC02 --> UC03 : in tmux
+UC02 --> UC04 : not in tmux
+UC03 --> UC05
+UC05 --> Tmux : switch-client
+UC04 --> Tmux : attach-session
+Tmux --> UC06
+UC06 --> UC07 : if SSE disconnected
+UC08 --> Tmux : kill agmgr-enter-*
+
+note right of UC03
+  preferred when MCP
+  SSE connections active
+  (no asyncio suspend)
+end note
+
+note right of UC07
+  out-of-tmux path only;
+  timeout 10 s
+end note
+@enduml

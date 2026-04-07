@@ -1,0 +1,126 @@
+@startuml
+title REQ-012 v2 — Architecture: LLM Orchestrator Replaces MCP Event Bus
+
+skinparam packageStyle rectangle
+skinparam componentStyle rectangle
+
+package "tmux session: agent-mgmt-{group_id8}" {
+  [PM pane] as PM
+  [Tech Director pane] as TD
+  [Developer pane] as DEV
+  [Tester pane] as TES
+  [User pane] as USR
+  [Orchestrator pane\n6th Claude CLI] as ORCH
+}
+
+package "backend/" {
+  [supervisor.py\n* dispatch_loop()\n* start/stop/resume group\n* force_advance / abort] as SUP
+  [orchestrator.py  (NEW)\npure functions:\nparse_latest_dispatch\ndetect_completion\nvalidate_dispatch_text] as ORCHMOD
+  [workflows.py  (NEW)\nstandard / prototype / research\nrender_for_orchestrator\nrequired_roles] as WF
+  [session_manager.py\n* start_agent_session (incl.\n  orchestrator branch)\n* _wait_for_pane_ready (F-04)\n* send_keys / capture_pane_output] as SM
+  [repository.py\n* schema v5 (drops events,\n  pending_events, topic_subs,\n  auto_respond; adds\n  groups.workflow_id)\n* role templates v5\n* SchemaIncompatibleError] as REPO
+  [models.py\nAgentRole.orchestrator\nno Event/PendingEvent] as MOD
+}
+
+package "frontend/" {
+  [app.py\n* schema-mismatch modal\n* workflow dropdown wiring\n* stall toast handler\n* F-03/F-06 carry-over] as APP
+  [group_panel.py\n+ Workflow dropdown] as GP
+  [agent_pane.py\nbadge: idle / step N/M] as AP
+  [tmux_attach.py\nF-03 carry-over\n(unchanged)] as ATT
+}
+
+database "SQLite (.agent_management/)" {
+  [groups\n(+ workflow_id)] as GTBL
+  [agents\n(role: orchestrator)] as ATBL
+  [sessions] as STBL
+  [role_templates v5] as RTBL
+  [meta\nschema_version=5\ntemplate_version=5] as MTBL
+}
+
+package "REMOVED in v2" #FFE0E0 {
+  [mcp_server.py] as XMCP
+  [events table] as XEV
+  [pending_events table] as XPE
+  [topic_subscriptions col] as XTS
+  [auto_respond col] as XAR
+}
+
+' Wiring
+SUP --> ORCHMOD : parse / detect
+SUP --> SM : send_keys, capture_pane_output
+SUP --> WF : get_workflow, render
+SUP --> REPO : get_orchestrator_for_group, sessions
+SUP ..> APP : Textual messages\n(WorkflowStepAdvanced,\nWorkflowStalled, etc.)
+
+SM --> REPO : save_session, update_status
+SM --> WF : render orchestrator prompt
+SM --> ORCH : start (orchestrator branch)
+SM --> PM
+SM --> TD
+SM --> DEV
+SM --> TES
+SM --> USR
+
+ORCH ..> SUP : pane output\n(<<DISPATCH>>, <<WORKFLOW_COMPLETE>>)
+SUP ..> PM : send_keys (dispatch text)
+SUP ..> TD
+SUP ..> DEV
+SUP ..> TES
+SUP ..> USR
+PM ..> SUP : pane output (<<TASK_DONE>>)
+TD ..> SUP
+DEV ..> SUP
+TES ..> SUP
+USR ..> SUP
+SUP ..> ORCH : send_keys ([WORKER_RESULT...])
+
+APP --> SUP : start_group, stop_group,\nforce_advance, abort_workflow
+APP --> REPO : init (catches\nSchemaIncompatibleError)
+APP --> ATT : grouped_attach (pane_id)
+APP --> GP
+APP --> AP
+
+GP --> WF : BUILT_IN_WORKFLOWS\n(dropdown source)
+GP --> REPO : set_workflow_id
+
+REPO --> GTBL
+REPO --> ATBL
+REPO --> STBL
+REPO --> RTBL
+REPO --> MTBL
+
+' Crossed-out removals
+XMCP -[#red,dashed]-> XEV
+XEV -[#red,dashed]-> XPE
+XPE -[#red,dashed]-> XTS
+XTS -[#red,dashed]-> XAR
+
+note bottom of XMCP
+  Entire file deleted.
+  publish_event, get_pending_events,
+  pause_agent (MCP), get_group_status
+  no longer exist as MCP tools.
+end note
+
+note right of ORCHMOD
+  Pure functions only —
+  no asyncio, no IO,
+  unit-tested without tmux.
+end note
+
+note right of WF
+  Three built-ins, in code,
+  not user-editable in v2.
+end note
+
+note bottom of SUP
+  v1 deletions:
+  _fan_out, _wake_agent,
+  _buffer_event, _drain_pending,
+  _deliver_event,
+  deliver_pending_event,
+  _WAKE_SIGNAL,
+  events polling loop.
+end note
+
+@enduml

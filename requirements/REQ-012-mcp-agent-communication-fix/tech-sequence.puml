@@ -1,0 +1,109 @@
+@startuml
+title REQ-012 v2 — Single Dispatch Cycle (Orchestrator drives one Worker)
+
+participant "Operator" as op
+participant "App\n(TUI)" as app
+participant "Supervisor\ndispatch_loop" as sup
+participant "orchestrator.py\n(pure functions)" as parser
+participant "session_manager\nsend_keys / capture_pane_output" as sm
+participant "Orchestrator\npane (Claude CLI)" as orch
+participant "Worker\npane (Claude CLI)" as wkr
+
+== Group Startup (F-04 + F-07 + F-11) ==
+
+op -> app : Start Group (workflow=standard)
+app -> sup : start_group(group_id)
+loop for each of the 5 workers
+  sup -> sm : start_agent_session(worker)
+  sm -> wkr : new pane + claude CLI
+  sm -> wkr : capture-pane poll (F-04)
+  wkr --> sm : output detected → active
+  sm --> sup : worker active
+end
+sup -> sm : start_agent_session(orchestrator)
+sm -> sm : workflows.render_for_orchestrator(\n  workflow, roster)
+sm -> orch : new pane + claude CLI\nwith rendered system prompt
+sm -> orch : capture-pane poll (F-04)
+orch --> sm : output detected → active
+sm --> sup : orchestrator active
+sup -> sup : spawn dispatch_loop(group_id)
+
+== Dispatch Cycle ==
+
+orch -> orch : LLM emits\n<<DISPATCH role="developer"\n  text="Implement feature X">>\n...\n<</DISPATCH>>
+
+loop every DISPATCH_POLL_INTERVAL (500ms)
+  sup -> sm : capture_pane_output(orch_pane)
+  sm --> sup : pane text
+  sup -> parser : parse_latest_dispatch(text, after=consumed_offset)
+  alt no new dispatch
+    parser --> sup : None
+    sup -> sup : sleep, continue loop
+  else dispatch found
+    parser --> sup : Dispatch(role, text, end_offset)
+    sup -> parser : validate_dispatch_text(dispatch.text)
+    parser --> sup : OK
+    sup -> sup : resolve role → worker session
+    sup -> sm : send_keys(worker_pane, dispatch.text)
+    sm -> wkr : inject prompt
+    sup -> sup : in_flight = InFlightDispatch(...)
+  end
+end
+
+== Worker Execution + Completion Detection (F-09) ==
+
+wkr -> wkr : LLM processes prompt\n(produces output incrementally)
+
+loop every DISPATCH_POLL_INTERVAL while in_flight
+  sup -> sm : capture_pane_output(worker_pane)
+  sm --> sup : pane text
+  sup -> sup : update last_change_at if changed
+  sup -> parser : detect_completion(\n  pane_text, dispatch_end_offset=0,\n  last_change_at, dispatch_at, now,\n  silence=60s, stall=600s)
+
+  alt <<TASK_DONE>> seen
+    parser --> sup : CompletionResult(layer=marker,\n  artifact="...")
+    note right of sup : ✓ primary signal
+  else 60s no change
+    parser --> sup : CompletionResult(layer=silence, ...)
+    sup -> app : log warning\n"completed by silence"
+    note right of sup : ✓ secondary fallback
+  else 10min no signal
+    parser --> sup : CompletionResult(layer=stall, ...)
+    sup -> app : post WorkflowStalled
+    app -> op : toast: Force Advance / Abort
+    alt user picks Force Advance
+      op -> app : click Force Advance
+      app -> sup : force_advance(group_id)
+      sup -> sup : synthesise CompletionResult(layer=silence,\n  artifact=current_pane_text)
+    else user picks Abort
+      op -> app : click Abort Workflow
+      app -> sup : abort_workflow(group_id)
+      sup -> app : post WorkflowAborted
+      sup -> sup : exit dispatch_loop
+    end
+  else still pending
+    parser --> sup : CompletionResult(layer=pending)
+    sup -> sup : continue loop
+  end
+end
+
+== Result Delivery ==
+
+sup -> sm : send_keys(orch_pane,\n  "[WORKER_RESULT role=\"developer\"\n     via=\"marker\"]\n  <artifact>\n  [/WORKER_RESULT]")
+sm -> orch : inject result
+sup -> app : post WorkflowStepAdvanced
+app -> op : update AgentPane badge\n("step 3/5")
+sup -> sup : in_flight = None
+sup -> sup : log INFO "completion ..."
+
+== Next Cycle ==
+
+orch -> orch : LLM reads [WORKER_RESULT],\ndecides next step
+note right of orch
+  Either emits next <<DISPATCH>>
+  to Tester, or emits
+  <<WORKFLOW_COMPLETE>> if
+  this was the final step.
+end note
+
+@enduml

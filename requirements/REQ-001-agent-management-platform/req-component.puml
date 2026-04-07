@@ -1,0 +1,61 @@
+@startuml req-component
+skinparam componentStyle uml2
+skinparam backgroundColor White
+
+package "Agent Management Platform (Python Process)" {
+  [Textual TUI App] as TUI
+  [Supervisor Service\n(asyncio polling loop)] as SUP
+  [agent-bus MCP Server\n(stdio / HTTP)] as MCP
+  [Session Manager] as SM
+  [SQLite Repository\n(WAL mode, aiosqlite)] as DB
+}
+
+package "tmux Session Layer\n(agent-mgmt-<group_id>)" {
+  [Pane: PM-Agent] as P1
+  [Pane: Dev-Agent] as P2
+  [Pane: Tester-Agent] as P3
+}
+
+package "Claude CLI Processes" {
+  [claude --session-id <uuid>\n--system-prompt "..."\n--mcp-config agent-bus\n--resume (optional)] as CLI
+}
+
+database "~/.agent_management/state.db\n(agents, groups, sessions, events)" as SQLITE
+database "~/.claude/projects/\n(session JSONL files)" as CLAUDEDB
+file "agent-bus MCP Config\n(.mcp.json per agent)" as MCPCFG
+
+TUI --> SUP : control commands\n(start/stop/pause/resume group)
+TUI <-- SUP : state updates\n(status badges, event log)
+SUP --> MCP : poll new events\n(every 250ms)
+SUP --> SM : start / stop / resume sessions
+SUP --> DB : read agent/group config\nwrite session state
+SM --> P1 : tmux create-pane\ntmux send-keys (inject events)
+SM --> P2 : tmux create-pane\ntmux send-keys (inject events)
+SM --> P3 : tmux create-pane\ntmux send-keys (inject events)
+SM --> DB : persist session state\n(tmux_pane_id, claude_session_id)
+P1 --> CLI : launch claude CLI
+P2 --> CLI : launch claude CLI
+P3 --> CLI : launch claude CLI
+CLI --> MCP : MCP tool calls\n(publish_event, get_group_status)
+CLI --> CLAUDEDB : read/write session JSONL
+MCP --> DB : store events in SQLite
+MCPCFG --> CLI : loaded via --mcp-config
+
+note right of MCP
+  MCP Tools:
+  - publish_event(topic, payload)
+  - get_pending_events(agent_id, topics)
+  - pause_agent(agent_id)
+  - get_group_status(group_id)
+end note
+
+note right of SM
+  Session Start Command:
+  cd <working_dir> &&
+  claude --session-id <uuid>
+        --system-prompt "<prompt>"
+        --mcp-config agent-bus.json
+        --name "<agent_name>"
+        [--resume <uuid>]
+end note
+@enduml

@@ -1,0 +1,93 @@
+@startuml
+title REQ-012 v2 — End-to-End Workflow Run
+
+start
+:Operator opens TUI;
+if (Schema version matches?) then (yes)
+else (no)
+  :Show destructive reset modal;
+  if (Operator clicks Reset?) then (yes)
+    :Wipe .agent_management/;
+    :Re-seed schema and templates;
+  else (no)
+    :Quit application;
+    stop
+  endif
+endif
+
+:Operator creates a Group;
+:Pick workflow template
+(standard / prototype / research);
+note right
+  REQ-009 auto-creates 6 agents:
+  Orchestrator + PM + Tech Director
+  + Developer + Tester + User
+end note
+
+:Operator clicks Start Group;
+
+partition "F-04 Worker Startup" {
+  :Start all 5 worker Claude CLI panes;
+  :Poll each pane for readiness;
+  if (All workers active before timeout?) then (yes)
+  else (no)
+    :Mark failed worker degraded;
+    :Show toast;
+    :Refuse to start orchestrator;
+    stop
+  endif
+}
+
+partition "F-04 Orchestrator Startup" {
+  :Render orchestrator system prompt
+  with workflow + roster + marker;
+  :Start orchestrator pane;
+  :Poll orchestrator pane for readiness;
+}
+
+partition "F-07/F-08 Workflow Loop" {
+  repeat
+    :Orchestrator emits
+    <<DISPATCH role="X" text="...">>;
+    :Platform parses dispatch block;
+    if (Role valid?) then (yes)
+      :send-keys prompt to worker pane;
+      partition "F-09 Completion Detection" {
+        repeat
+          :capture-pane every 500ms;
+          if (TASK_DONE marker seen?) then (marker)
+            :Extract artifact at marker;
+            break
+          elseif (60s no change?) then (silence)
+            :Extract current pane content;
+            :Log "completed by silence";
+            break
+          elseif (10min no signal?) then (stall)
+            :Inject [PLATFORM_STALL] to orchestrator;
+            :Show toast: Force Advance / Abort;
+            if (User picks Force Advance?) then (advance)
+              :Capture current artifact;
+              break
+            else (abort)
+              :Terminate workflow;
+              stop
+            endif
+          else (still polling)
+          endif
+        repeat while (signal pending)
+      }
+      :Inject [WORKER_RESULT role="X"]
+      back into orchestrator pane;
+    else (no)
+      :Inject [PLATFORM_ERROR];
+      :Wait for orchestrator retry;
+    endif
+  repeat while (orchestrator emitted WORKFLOW_COMPLETE?) is (no)
+  -> yes;
+}
+
+:Mark workflow done;
+:Operator may attach to any pane
+to inspect artifacts;
+stop
+@enduml
