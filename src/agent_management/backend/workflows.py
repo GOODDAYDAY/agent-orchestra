@@ -216,9 +216,65 @@ def render_for_orchestrator(
     return "\n".join(lines)
 
 
-def render_roster(roster: list[tuple[AgentRole, str, str]]) -> str:
-    """Render the worker roster for `{{WORKER_ROSTER}}`."""
-    return "\n".join(
-        f"  - {role.value}: {name} (pane {pane_id})"
-        for role, name, pane_id in roster
-    )
+# REQ-018 F-02: per-role capability descriptions surfaced to the orchestrator
+# in its system prompt, so it makes informed routing decisions. Pure data —
+# to add a new role or tweak wording, edit the dict entry here. The
+# orchestrator's rendered roster will pick up the change automatically at
+# the next session start.
+ROLE_CAPABILITIES: dict[AgentRole, str] = {
+    AgentRole.product_manager: (
+        "Expand rough requirements into complete spec documents; clarify "
+        "target users, scenarios, functional + non-functional requirements, "
+        "acceptance criteria. Does not write code."
+    ),
+    AgentRole.tech_director: (
+        "Produce technical designs and review architecture; pick the right "
+        "abstractions, module boundaries, data models, and highlight risks. "
+        "Does not write production code."
+    ),
+    AgentRole.developer: (
+        "Implement code following a technical design, run commands, write "
+        "and run tests, invoke any /req-* skill the orchestrator specifies. "
+        "The primary execution hand."
+    ),
+    AgentRole.tester: (
+        "Run test suites, design edge-case coverage, report failures. Emits "
+        "<<TESTS_FAILED>> before <<TASK_DONE>> when any test fails so the "
+        "orchestrator can loop back to developer."
+    ),
+    AgentRole.user: (
+        "Human-facing acceptance review. When a real operator attaches to "
+        "this pane, control transfers to the human. Otherwise, plays a "
+        "user persona for verification."
+    ),
+    AgentRole.custom: (
+        "Free-form role — capabilities defined by whatever system prompt "
+        "the operator gave when creating this agent."
+    ),
+}
+
+
+def render_roster(
+    roster: list[tuple[AgentRole, str, str]],
+    include_capabilities: bool = True,
+) -> str:
+    """Render the worker roster for the ``{{WORKER_ROSTER}}`` placeholder
+    in the orchestrator's system prompt.
+
+    REQ-018 F-02: when ``include_capabilities=True`` (default), each roster
+    line is followed by a ``→ <capability>`` line pulled from
+    ``ROLE_CAPABILITIES``. This gives the orchestrator explicit routing
+    guidance per subordinate.
+
+    Passing ``include_capabilities=False`` reproduces the pre-REQ-018
+    plain format (single line per agent). Backward-compatible for any
+    future caller that wants the legacy shape.
+    """
+    lines: list[str] = []
+    for role, name, pane_id in roster:
+        lines.append(f"  - {role.value}: {name} (pane {pane_id})")
+        if include_capabilities:
+            capability = ROLE_CAPABILITIES.get(role)
+            if capability:
+                lines.append(f"    → {capability}")
+    return "\n".join(lines)
