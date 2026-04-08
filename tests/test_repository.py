@@ -373,3 +373,43 @@ class TestRoleTemplateUserEdits:
         dev = next(t for t in templates if t.role == AgentRole.developer)
         assert dev.system_prompt != "custom prompt"
         assert "<<TASK_DONE>>" in dev.system_prompt
+
+
+# ---- REQ-016 F-05: template version bump + /req-* references --------------
+
+class TestReq016TemplateVersion:
+    async def test_template_version_is_6(self, repo: Repository):
+        assert Repository._TEMPLATE_VERSION == 6
+
+    async def test_orchestrator_template_has_skill_section(self, repo: Repository):
+        prompt = await repo.get_orchestrator_template()
+        assert "技能调用规则" in prompt
+        assert "/req-" in prompt
+
+    async def test_orchestrator_template_lists_common_skills(self, repo: Repository):
+        prompt = await repo.get_orchestrator_template()
+        for skill in ["/req-1-analyze", "/req-2-tech", "/req-3-code", "/req-7-verify"]:
+            assert skill in prompt, f"{skill} missing from orchestrator template"
+
+    async def test_pm_template_mentions_req1_analyze(self, repo: Repository):
+        templates = await repo.get_role_templates()
+        pm = next(t for t in templates if t.role == AgentRole.product_manager)
+        assert "技能调用规则" in pm.system_prompt
+        assert "/req-" in pm.system_prompt
+
+    async def test_tech_director_template_mentions_skill_rule(self, repo: Repository):
+        templates = await repo.get_role_templates()
+        td = next(t for t in templates if t.role == AgentRole.tech_director)
+        assert "技能调用规则" in td.system_prompt
+
+    async def test_developer_template_lists_full_req_pipeline(self, repo: Repository):
+        templates = await repo.get_role_templates()
+        dev = next(t for t in templates if t.role == AgentRole.developer)
+        for skill in ["/req-3-code", "/req-4-security", "/req-5-cleanup",
+                      "/req-6-review", "/req-7-verify"]:
+            assert skill in dev.system_prompt, f"{skill} missing from developer template"
+
+    async def test_tester_template_mentions_req7_verify(self, repo: Repository):
+        templates = await repo.get_role_templates()
+        tester = next(t for t in templates if t.role == AgentRole.tester)
+        assert "/req-7-verify" in tester.system_prompt

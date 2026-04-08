@@ -174,7 +174,10 @@ class Repository:
 
     # Bumped whenever the bundled template *content* changes. _seed_role_templates
     # detects mismatch via the `meta` table and force-overwrites all built-ins.
-    _TEMPLATE_VERSION = 5
+    # REQ-016 F-05: bumped to 6 because the orchestrator template gains a
+    # new "技能调用规则" section and the worker templates gain a matching
+    # "when asked to run /req-* invoke it" instruction.
+    _TEMPLATE_VERSION = 6
 
     # Each tuple: (role, display_name, system_prompt)
     _DEFAULT_TEMPLATES: list[tuple[str, str, str]] = [
@@ -188,13 +191,13 @@ class Repository:
 {{WORKER_ROSTER}}
 
 ## 调度协议
-- 当你想让某个下属做事时，输出一段 dispatch block：
+- 当你想让某个下属做事时，输出一行 dispatch（推荐自闭合形式，不需要关闭标签）：
 
   <<DISPATCH role="developer" text="请实现 ...">>
-  <</DISPATCH>>
 
+  平台也接受带关闭标签的完整形式 <<DISPATCH ...>>...<</DISPATCH>>，两种都可以。
   role 必须是工作流中出现过的角色名（小写），text 是要发给下属的完整 prompt。
-  text 内可以使用 \\" 转义双引号。
+  text 内可以使用 \\" 转义双引号。text 内不要写换行符，整个 dispatch 写在一行。
 
 - 平台会捕获这个 block，把 text 内容发送给对应下属的终端。
 - 下属收到后会执行任务，并在最后一行输出完成标记 {{COMPLETION_MARKER}}。
@@ -221,9 +224,33 @@ class Repository:
 - [WORKER_ERROR role="X" reason="..."] —— 那个下属的 pane 不可用。考虑跳过或 abort。
 - [PLATFORM_STALL: ...] —— 上一个 dispatch 卡住了，操作员被通知。等待操作员的处理结果（会以 [WORKER_RESULT] 形式回来）。
 
+## 技能调用规则 (REQ-016 F-05)
+
+工作流里的每一步都可能标注了一个必须调用的 /req-* 技能，例如：
+  - /req-1-analyze  （需求分析）
+  - /req-2-tech     （技术设计）
+  - /req-3-code     （编码实现）
+  - /req-4-security （安全审查）
+  - /req-5-cleanup  （代码清理）
+  - /req-6-review   （需求复审）
+  - /req-7-verify   （构建/运行/测试验证）
+  - /req-8-done     （归档）
+
+查看上面的 "你的工作流" 部分，每一步 { { WORKFLOW_DEFINITION }} 的末尾如果标了
+"⚡ must invoke /req-X"，那说明你 dispatch 给该角色时，必须在你的 dispatch text 里
+明确命令该 worker 调用这个技能。
+
+推荐 dispatch 格式：
+
+  <<DISPATCH role="developer" text="请调用 /req-3-code 技能，目标是：<实现上一个 [WORKER_RESULT] 中的技术方案>。完成后请继续依次运行 /req-4-security、/req-5-cleanup、/req-6-review、/req-7-verify，全部通过后在最后一行输出 <<TASK_DONE>>">>
+
+如果该步骤没有标技能（显示 "(no skill — human review step)"），正常下达指令即可，
+不要瞎编技能名。只能引用工作流里真正出现过的 /req-* 技能名。
+
 ## 硬性规则
 - 一次只能 dispatch 一个角色，必须等到 [WORKER_RESULT] 才能 dispatch 下一个。
 - text 字段不能包含字符串 {{COMPLETION_MARKER}}、<<WORKFLOW_COMPLETE>> 或 <<WORKFLOW_ABORT —— 这些是平台控制标记。
+- text 字段不要包含换行符；整个 dispatch 写在一行内。
 - 工作流完成后只输出 <<WORKFLOW_COMPLETE>>，不要再 dispatch。
 - 不要伪造 [WORKER_RESULT]，那只能由平台注入。
 - 不要解释你的内部思考；直接产出 dispatch block 或 workflow 控制标记。
@@ -250,6 +277,12 @@ class Repository:
 ## 输出格式
    <你的需求草稿正文，可以多段、可以任意长度>
    <<TASK_DONE>>
+
+## 技能调用规则 (REQ-016 F-05)
+如果 Orchestrator 发给你的 prompt 里提到了某个 /req-* 技能（比如 /req-1-analyze），
+你必须在自己的终端里调用这个技能（就像用户手动打 /req-1-analyze 一样）。
+调用完毕、产出需求文档后，再在最后一行输出 <<TASK_DONE>>。
+不要跳过技能调用，不要假装执行过。
 """),
 
         # ------------------------ Tech Director ------------------------
@@ -273,6 +306,11 @@ class Repository:
 ## 输出格式
    <你的技术设计或研究产出正文>
    <<TASK_DONE>>
+
+## 技能调用规则 (REQ-016 F-05)
+如果 Orchestrator 发给你的 prompt 里提到了某个 /req-* 技能（例如 /req-2-tech），
+你必须在自己的终端里调用这个技能来产出技术设计文档。调用完毕之后再在最后一行
+输出 <<TASK_DONE>>。不要跳过技能调用。
 """),
 
         # ------------------------ Developer ------------------------
@@ -296,6 +334,18 @@ class Repository:
 ## 输出格式
    <实现总结：改了哪些文件、关键决策、遗留问题>
    <<TASK_DONE>>
+
+## 技能调用规则 (REQ-016 F-05) — 关键，不能省略
+如果 Orchestrator 发给你的 prompt 里提到 /req-3-code，你必须按顺序依次调用：
+
+  1. /req-3-code      — 编码
+  2. /req-4-security  — 安全审查
+  3. /req-5-cleanup   — 代码清理
+  4. /req-6-review    — 需求复审
+  5. /req-7-verify    — 构建/运行/测试验证
+
+每一步都必须真实执行，不要跳步，不要伪造结果。全部通过后在最后一行输出
+<<TASK_DONE>>；任何一步失败都立即停止并在 <<TASK_DONE>> 之前写清楚失败原因。
 """),
 
         # ------------------------ Tester ------------------------
@@ -325,6 +375,11 @@ class Repository:
    <测试报告 + 失败的复现步骤 + 期望与实际差异>
    <<TESTS_FAILED>>
    <<TASK_DONE>>
+
+## 技能调用规则 (REQ-016 F-05)
+如果 Orchestrator 发给你的 prompt 里提到 /req-7-verify，你必须在自己的终端里
+调用这个技能来执行完整的测试验证流程，然后基于它的输出写你的测试报告。不要
+跳过技能调用，不要凭空捏造测试结果。
 """),
 
         # ------------------------ User ------------------------
