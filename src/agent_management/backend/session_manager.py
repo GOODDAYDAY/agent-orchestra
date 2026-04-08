@@ -97,16 +97,47 @@ class SessionManager:
         all_lines = stdout.splitlines()
         return "\n".join(all_lines[-lines:]) if all_lines else ""
 
-    async def capture_pane_full(self, pane_id: str, history_lines: int = 2000) -> str:
+    async def capture_pane_full(
+        self,
+        pane_id: str,
+        history_lines: int = 2000,
+        ansi: bool = False,
+    ) -> str:
         """Capture pane content including scrollback up to `history_lines` lines.
 
         REQ-012 v2: used by Supervisor.dispatch_loop to track orchestrator/worker
         output across many turns without losing earlier dispatches.
+
+        REQ-015: when `ansi=True` the underlying tmux call adds the `-e` flag
+        so the captured text retains ANSI escape sequences. The AgentPane uses
+        this so the read-only preview can render colours via Rich's
+        `Text.from_ansi`. The supervisor's dispatch_loop continues to call
+        without `ansi=True` so its parser sees plain text.
         """
-        rc, stdout, _ = await self._tmux(
-            "capture-pane", "-p", "-S", f"-{history_lines}", "-t", pane_id,
-        )
+        args = ["capture-pane", "-p"]
+        if ansi:
+            args.append("-e")
+        args += ["-S", f"-{history_lines}", "-t", pane_id]
+        rc, stdout, _ = await self._tmux(*args)
         return stdout if rc == 0 else ""
+
+    async def send_raw_keys(
+        self, pane_id: str, *key_args: str
+    ) -> tuple[int, str, str]:
+        """Send raw tmux key specs to a pane via `tmux send-keys`.
+
+        REQ-015: distinct from `send_keys` (which sanitises text and appends
+        Enter — that path is reserved for the orchestrator dispatch loop).
+        `send_raw_keys` is the user-input path: it accepts already-validated
+        tmux key tokens (e.g. "Enter", "C-c", "Up", or single printable
+        characters) and forwards them verbatim with no trailing Enter.
+
+        Returns (rc, stdout, stderr) so callers can react to failures
+        (e.g. show a "pane gone" toast).
+        """
+        if not key_args:
+            return 0, "", ""
+        return await self._tmux("send-keys", "-t", pane_id, *key_args)
 
     @staticmethod
     def _sanitize_payload(text: str) -> str:

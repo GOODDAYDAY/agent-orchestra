@@ -48,3 +48,12 @@ ORCHESTRATOR_STALL_TIMEOUT: float = 600.0
 # REQ-012 v2: schema version. Bumped whenever the SQLite schema changes in a
 # breaking way; on mismatch the application shows a destructive-reset modal.
 SCHEMA_VERSION: int = 5
+
+# REQ-015: AgentPane preview tuning.
+# OUTPUT_POLL_INTERVAL_MS — read-only preview refresh interval (currently
+# unused at runtime; the existing PANE_REFRESH_INTERVAL drives refresh, this
+# constant is reserved for future per-pane fine-grained polling and tests).
+OUTPUT_POLL_INTERVAL_MS: int = 500
+# OUTPUT_BUFFER_LINES — RichLog ring buffer cap; oldest lines are dropped
+# silently when the buffer is full.
+OUTPUT_BUFFER_LINES: int = 500
