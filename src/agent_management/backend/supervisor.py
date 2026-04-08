@@ -1,11 +1,51 @@
-"""Supervisor — orchestrator dispatch driver.
+"""Supervisor — the executive assistant to the Orchestrator agent.
 
-REQ-012 v2: replaces the v1 fan-out / pending_events / wake-up-sentinel
-machinery with a single dispatch_loop coroutine per active group. The loop
-reads the orchestrator's tmux pane via capture-pane, parses <<DISPATCH ...>>
-blocks, sends the dispatch text to the target worker pane, polls the worker
-pane for <<TASK_DONE>> (with silence/stall fallbacks), and injects the
-[WORKER_RESULT ...] back into the orchestrator pane.
+Responsibilities
+----------------
+- **Group lifecycle**: start / stop / resume / clear, all parallelised
+  across agents via ``asyncio.gather(return_exceptions=True)``.
+- **Orchestrator dispatch loop**: polls the orchestrator pane, parses
+  ``<<DISPATCH ...>>`` blocks, routes their text to the target worker
+  pane, and injects the worker's output back into the orchestrator
+  pane as ``[WORKER_RESULT ...]``.
+- **Operator interventions**: ``force_advance``, ``abort_workflow``,
+  ``pause_agent``, ``resume_agent``.
+
+Mental model (REQ-018)
+----------------------
+The Supervisor is **NOT a peer-agent message bus.** Workers do not talk
+to each other directly; the orchestrator is the *single* cross-agent
+transit point. Every piece of cross-pane information flows:
+``worker → supervisor → orchestrator → supervisor → next worker``.
+The orchestrator is the parent; workers are its subordinates; the
+supervisor is the executive assistant that enforces this topology at
+the code level.
+
+Key invariants
+--------------
+1. **Workers have no knowledge of the orchestrator.** The callback
+   contract (``<<TASK_DONE>>`` → ``[WORKER_RESULT]``) is enforced by
+   the dispatch_loop, not by anything in the worker prompts.
+2. **The orchestrator is the single decision-maker** for "who does
+   what next". Python code provides it with a workflow playbook
+   (``render_for_orchestrator``), a worker roster with capability
+   descriptions (``render_roster`` + ``ROLE_CAPABILITIES``), and a
+   skill catalogue (``render_skill_catalogue``) — but Python code
+   never makes the decision itself.
+3. **Group lifecycle operations parallelise across agents.** One
+   failing agent never blocks its siblings (see REQ-016 F-03 for
+   start/stop/resume and REQ-018 F-01 for clear_all).
+4. **Content-signature dispatch dedup** (REQ-014 F-01), **self-closing
+   dispatch parsing** (REQ-016 F-04a), and **three-layer completion
+   detection** (marker / silence / stall, REQ-012 v2 F-09) are
+   implemented in the dispatch_loop's inner machinery.
+
+Historical note
+---------------
+REQ-012 v2 replaced the v1 fan-out / pending_events / wake-up-sentinel
+machinery with the current orchestrator model. REQ-016 F-03 parallelised
+start/stop/resume. REQ-018 F-01 finished the job for clear_all and
+introduced the orchestrator-centric mental model documented above.
 """
 from __future__ import annotations
 
@@ -22,6 +62,7 @@ from agent_management.backend.models import (
     Agent,
     AgentRole,
     AgentStatus,
+    Session,
 )
 from agent_management.backend.orchestrator import (
     CompletionLayer,
@@ -310,20 +351,44 @@ class Supervisor:
             self._active_group_id = None
 
     async def clear_all(self) -> None:
+        """Stop every session across every group, then wipe runtime state.
+
+        REQ-018 F-01: runs all ``stop_agent_session`` calls concurrently
+        via ``asyncio.gather(return_exceptions=True)``. Per-session
+        exceptions are isolated and logged individually; no broken session
+        can block the others. Consistent with the pattern used by
+        start_group / stop_group / resume_group since REQ-016 F-03.
+        """
         import shutil
 
         await self._cancel_dispatch_loop()
+
+        # 1. Collect every session across every group into one flat list.
+        all_sessions: list[Session] = []
         for group in await self._repo.get_groups():
-            sessions = await self._repo.get_sessions_for_group(group.id)
-            for session in sessions:
-                try:
-                    await self._sm.stop_agent_session(session)
-                except Exception:
-                    logger.exception("Error stopping session %s", session.id)
+            all_sessions.extend(await self._repo.get_sessions_for_group(group.id))
+
+        # 2. Stop them in parallel.
+        if all_sessions:
+            results = await asyncio.gather(
+                *[self._sm.stop_agent_session(s) for s in all_sessions],
+                return_exceptions=True,
+            )
+            for session, result in zip(all_sessions, results):
+                if isinstance(result, Exception):
+                    logger.exception(
+                        "clear_all: error stopping session %s: %s",
+                        session.id, result,
+                    )
+                else:
+                    self._app.post_message(AgentStatusChanged(
+                        agent_id=session.agent_id, status=AgentStatus.stopped
+                    ))
+
         self._active_group_id = None
 
+        # 3. Wipe runtime state + temp dir (unchanged).
         await self._repo.clear_all_runtime_state()
-
         if TEMP_DIR.exists():
             shutil.rmtree(TEMP_DIR, ignore_errors=True)
             TEMP_DIR.mkdir(exist_ok=True)
