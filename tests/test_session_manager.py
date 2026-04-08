@@ -152,6 +152,27 @@ class TestRenderOrchestratorPrompt:
         )
         assert "自主编排者" in rendered
 
+    async def test_rendered_prompt_contains_capability_descriptions(
+        self, repo: Repository, group_with_workers,
+    ):
+        """REQ-018 F-02 regression guard: the final rendered orchestrator
+        prompt must include the per-role capability lines surfaced by
+        render_roster's include_capabilities=True default. If a future
+        change accidentally flips the flag to False, this test fails."""
+        from agent_management.backend.workflows import ROLE_CAPABILITIES
+        group, agents = group_with_workers
+        sm = SessionManager(repo)
+        rendered = await sm._render_orchestrator_prompt(
+            agents[AgentRole.orchestrator], group.id
+        )
+        # At least two distinct capability fragments should appear
+        developer_desc_fragment = ROLE_CAPABILITIES[AgentRole.developer].split(",")[0][:30]
+        tester_desc_fragment = ROLE_CAPABILITIES[AgentRole.tester].split(",")[0][:30]
+        assert developer_desc_fragment in rendered
+        assert tester_desc_fragment in rendered
+        # The '→' arrow marker should appear in the rendered roster block
+        assert "→" in rendered
+
     async def test_completion_marker_replaced_with_literal(
         self, repo: Repository, group_with_workers,
     ):

@@ -260,6 +260,112 @@ class TestAvailableSkillsCatalogue:
             assert fragment in rendered, f"description fragment missing: {fragment!r}"
 
 
+# ---- REQ-018 F-02: ROLE_CAPABILITIES + enriched roster --------------------
+
+
+class TestRoleCapabilities:
+    def test_capabilities_cover_all_canonical_roles(self):
+        """REQ-018 F-02: every canonical worker role must have a capability
+        description so the orchestrator never sees a blank subordinate."""
+        canonical = [
+            AgentRole.product_manager,
+            AgentRole.tech_director,
+            AgentRole.developer,
+            AgentRole.tester,
+            AgentRole.user,
+        ]
+        for role in canonical:
+            assert role in workflows.ROLE_CAPABILITIES
+            desc = workflows.ROLE_CAPABILITIES[role]
+            assert isinstance(desc, str)
+            assert len(desc) > 20  # non-trivial description
+
+    def test_custom_role_also_has_a_capability_line(self):
+        # Custom role is allowed in the catalogue so operators who choose
+        # it see an explanation rather than a blank roster line.
+        assert AgentRole.custom in workflows.ROLE_CAPABILITIES
+
+    def test_developer_capability_mentions_req_skills(self):
+        # The developer is the primary /req-* skill invoker; its capability
+        # line should say so explicitly.
+        desc = workflows.ROLE_CAPABILITIES[AgentRole.developer]
+        assert "/req-" in desc
+
+    def test_tester_capability_mentions_tests_failed_marker(self):
+        desc = workflows.ROLE_CAPABILITIES[AgentRole.tester]
+        assert "<<TESTS_FAILED>>" in desc
+
+    def test_pm_capability_forbids_code(self):
+        desc = workflows.ROLE_CAPABILITIES[AgentRole.product_manager]
+        assert "Does not write code" in desc
+
+    def test_tech_director_capability_forbids_code(self):
+        desc = workflows.ROLE_CAPABILITIES[AgentRole.tech_director]
+        assert "Does not write production code" in desc
+
+
+class TestRenderRosterCapabilities:
+    def _roster(self):
+        return [
+            (AgentRole.product_manager, "sprint - PM", "%1"),
+            (AgentRole.tech_director,   "sprint - TD", "%2"),
+            (AgentRole.developer,       "sprint - Dev", "%3"),
+            (AgentRole.tester,          "sprint - Tester", "%4"),
+            (AgentRole.user,            "sprint - User", "%5"),
+        ]
+
+    def test_default_render_includes_capability_lines(self):
+        """REQ-018 F-02: default call produces one role line AND one
+        capability line per entry, prefixed with '→'."""
+        rendered = workflows.render_roster(self._roster())
+        # Every role's capability should appear in the output
+        for role in [
+            AgentRole.product_manager,
+            AgentRole.developer,
+            AgentRole.tester,
+        ]:
+            expected_fragment = workflows.ROLE_CAPABILITIES[role].split(";")[0][:30]
+            assert expected_fragment in rendered, (
+                f"capability fragment for {role.value} missing"
+            )
+
+    def test_default_render_has_arrow_prefix(self):
+        rendered = workflows.render_roster(self._roster())
+        assert "→" in rendered
+
+    def test_opt_out_produces_legacy_format(self):
+        """REQ-018 F-02: include_capabilities=False gives the pre-REQ-018
+        plain format (single line per agent, no capability markers)."""
+        rendered = workflows.render_roster(self._roster(), include_capabilities=False)
+        assert "→" not in rendered
+        # Still contains role + name + pane
+        assert "product_manager: sprint - PM (pane %1)" in rendered
+
+    def test_default_still_contains_role_name_and_pane(self):
+        rendered = workflows.render_roster(self._roster())
+        assert "product_manager: sprint - PM (pane %1)" in rendered
+        assert "developer: sprint - Dev (pane %3)" in rendered
+
+    def test_empty_roster_produces_empty_string(self):
+        assert workflows.render_roster([]) == ""
+
+    def test_roster_with_unknown_role_degrades_gracefully(self):
+        # If a role is missing from ROLE_CAPABILITIES (future, hypothetical),
+        # the roster line still appears, just without a → capability line.
+        # We simulate by removing a key temporarily.
+        original = workflows.ROLE_CAPABILITIES.pop(AgentRole.user, None)
+        try:
+            rendered = workflows.render_roster([
+                (AgentRole.user, "sprint - User", "%5"),
+            ])
+            assert "user: sprint - User (pane %5)" in rendered
+            # No capability line for user now
+            assert "→" not in rendered
+        finally:
+            if original is not None:
+                workflows.ROLE_CAPABILITIES[AgentRole.user] = original
+
+
 class TestRenderForOrchestratorNoSkillLines:
     """REQ-017 F-03: render_for_orchestrator must NOT emit skill directives.
     Skill selection is now the orchestrator LLM's runtime decision."""

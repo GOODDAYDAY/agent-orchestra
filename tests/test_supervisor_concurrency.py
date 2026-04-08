@@ -193,6 +193,89 @@ class TestStopGroupConcurrent:
 # ---- resume_group parallelism -----------------------------------------------
 
 
+# ---- REQ-018 F-01: clear_all parallelism ----------------------------------
+
+
+class TestClearAllConcurrent:
+    async def test_clear_all_stops_sessions_in_parallel(self, concurrency_scenario):
+        """REQ-018 F-01: clear_all must use asyncio.gather so stopping N
+        sessions takes ~one stop's wall time, not N × stop time."""
+        sup = concurrency_scenario["sup"]
+        sm = concurrency_scenario["sm"]
+        group = concurrency_scenario["group"]
+
+        # Start the group to populate sessions (6 sessions total).
+        await sup.start_group(group.id)
+        await sup._cancel_dispatch_loop()
+
+        sm.stop_calls.clear()
+        t0 = time.monotonic()
+        await sup.clear_all()
+        elapsed = time.monotonic() - t0
+
+        # All 6 sessions should have been stopped.
+        assert len(sm.stop_calls) == 6
+        # Sequential would be 6 × 0.1 = 0.6 s. Parallel should be ~0.1 s.
+        # Allow 0.4 s margin for scheduling + temp-dir cleanup overhead.
+        assert elapsed < 0.4, (
+            f"Expected concurrent clear_all < 0.4s, got {elapsed:.2f}s"
+        )
+
+    async def test_clear_all_zero_groups_is_noop(self, concurrency_scenario, tmp_path):
+        """REQ-018 F-01: clear_all with no groups must return cleanly
+        (no gather on an empty list, no exception)."""
+        from agent_management.backend.repository import Repository
+        from agent_management.backend.supervisor import Supervisor
+
+        # Build a totally empty repo — no groups at all.
+        repo = Repository(db_path=tmp_path / "empty.db")
+        await repo.init()
+
+        sm = SlowFakeSessionManager(repo, delay_seconds=0.1)
+        app = FakeApp()
+        sup = Supervisor(repo, sm, app)  # type: ignore[arg-type]
+
+        t0 = time.monotonic()
+        await sup.clear_all()
+        elapsed = time.monotonic() - t0
+
+        assert len(sm.stop_calls) == 0
+        assert elapsed < 0.1  # nothing to wait on
+        await repo.close()
+
+    async def test_clear_all_isolates_per_session_failures(self, concurrency_scenario):
+        """REQ-018 F-01: one failing stop must not block the others.
+        The flag `return_exceptions=True` on asyncio.gather guarantees this."""
+        sup = concurrency_scenario["sup"]
+        sm = concurrency_scenario["sm"]
+        agents = concurrency_scenario["agents"]
+        group = concurrency_scenario["group"]
+
+        # Start the group to populate sessions.
+        await sup.start_group(group.id)
+        await sup._cancel_dispatch_loop()
+
+        # Make one pane's stop raise by monkeypatching the fake SM's
+        # stop_agent_session for just that session.
+        target_agent_id = agents[AgentRole.developer].id
+        original_stop = sm.stop_agent_session
+
+        async def poisoned_stop(session):
+            if session.agent_id == target_agent_id:
+                raise RuntimeError("scripted stop failure")
+            return await original_stop(session)
+
+        sm.stop_agent_session = poisoned_stop  # type: ignore[method-assign]
+
+        sm.stop_calls.clear()
+        # clear_all must not raise
+        await sup.clear_all()
+
+        # 5 other sessions stopped successfully (developer raised)
+        assert len(sm.stop_calls) == 5
+        assert target_agent_id not in sm.stop_calls
+
+
 class TestResumeGroupConcurrent:
     async def test_resume_workers_in_parallel(self, concurrency_scenario):
         sup = concurrency_scenario["sup"]
