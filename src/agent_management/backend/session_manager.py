@@ -150,28 +150,21 @@ class SessionManager:
         return sanitized
 
     async def send_keys(self, pane_id: str, text: str) -> None:
-        """Inject text into a tmux pane.
+        """Inject text into a tmux pane as a sanitised keystroke stream + Enter.
 
-        Short payloads sent directly. Long payloads written to a temp file and
-        injected via `cat`. All payloads are sanitized.
+        REQ-016 F-04b: the old long-payload "cat fallback" has been removed.
+        It was designed for shell panes; inside a Claude CLI pane the text
+        "cat /path/to/file" is received as a literal chat message rather than
+        executed, so dispatched content never reached the agent. tmux
+        send-keys accepts large argv tokens on all target OSes, well above
+        the 50 KB cap in _sanitize_payload, so we can always send directly.
         """
         safe_text = self._sanitize_payload(text)
-        if len(safe_text) <= DIRECT_SEND_MAX_LEN:
-            rc, _, err = await self._tmux("send-keys", "-t", pane_id, safe_text, "Enter")
-            if rc != 0:
-                logger.warning("send-keys failed for pane %s: %s", pane_id, err)
-        else:
-            tmp_path = TEMP_DIR / f"agent_msg_{uuid.uuid4().hex}.txt"
-            tmp_path.write_text(safe_text, encoding="utf-8")
-            try:
-                tmp_path.chmod(0o600)
-            except OSError:
-                pass  # Windows
-            cmd = f"cat {shlex.quote(str(tmp_path))}"
-            rc, _, err = await self._tmux("send-keys", "-t", pane_id, cmd, "Enter")
-            if rc != 0:
-                logger.warning("send-keys (cat) failed for pane %s: %s", pane_id, err)
-            asyncio.get_running_loop().call_later(5.0, _cleanup_temp, tmp_path)
+        if not safe_text:
+            return
+        rc, _, err = await self._tmux("send-keys", "-t", pane_id, safe_text, "Enter")
+        if rc != 0:
+            logger.warning("send-keys failed for pane %s: %s", pane_id, err)
 
     async def pane_exists(self, pane_id: str) -> bool:
         rc, _, _ = await self._tmux("display-message", "-p", "-t", pane_id, "")
