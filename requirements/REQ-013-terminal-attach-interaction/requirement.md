@@ -1,8 +1,20 @@
 # REQ-013 Terminal Attach Interaction & Output Scroll Fix
 
-> Status: Requirement Finalized
+> **Status update (2026-04-08)**: This requirement is **Superseded by REQ-015 (Native-First Interaction)**.
+> REQ-015 absorbs all of REQ-013's functional requirements (F-01 Enter Attach, F-02 Attach state
+> indicator, F-03 Read-only output preview with ANSI rendering, F-04 Scroll lock fix, F-05 Quick
+> action buttons) and adds two pieces REQ-013 explicitly deferred:
+>
+> 1. Deletion of the OLD per-pane Input + Send affordance.
+> 2. A dedicated input box that operates in pure key-forwarding mode, so users can type to the
+>    agent in real time without leaving the TUI.
+>
+> REQ-013 was never implemented; the document is preserved here as historical analysis. See
+> `requirements/REQ-015-native-first-interaction/requirement.md` for the active design.
+>
+> Status: Superseded by REQ-015
 > Created: 2026-04-07
-> Updated: 2026-04-07
+> Updated: 2026-04-08
 
 ## 1. Background
 
