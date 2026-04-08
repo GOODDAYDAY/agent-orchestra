@@ -602,6 +602,125 @@ class TestScrollbackResilience:
         )
 
 
+# ---- REQ-016 F-04c/d: newline strip + diagnostic log ----------------------
+
+
+class TestNewlineStripAndDiagnosticLog:
+    async def test_multi_line_dispatch_text_is_flattened(self, scenario):
+        """REQ-016 F-04c: the dispatch_loop must replace newlines in the
+        dispatch text with spaces before calling send_keys, so tmux doesn't
+        submit the first line and drop the rest."""
+        sup = scenario["supervisor"]
+        sm = scenario["sm"]
+        orch_agent = scenario["agents"][AgentRole.orchestrator]
+        pm_pane = scenario["pane_ids"][AgentRole.product_manager]
+        orch_pane = scenario["orch_pane"]
+
+        # Orchestrator emits a dispatch with escaped quotes but a real newline
+        # inside the text attribute (Claude sometimes produces this).
+        sm.set_pane_state(
+            orch_pane,
+            (
+                '<<DISPATCH role="product_manager" text="line one\n'
+                'line two\n'
+                'line three">>'
+            ),
+        )
+        sm.set_pane_state(pm_pane, "done\n<<TASK_DONE>>")
+
+        task = asyncio.create_task(
+            sup._dispatch_loop(scenario["group"].id, orch_agent)
+        )
+        await asyncio.sleep(0.15)
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        pm_sends = _sends_to(sm, pm_pane)
+        # All three lines must be present, concatenated with spaces.
+        delivered = next((s for s in pm_sends if "line one" in s), None)
+        assert delivered is not None, f"no dispatch reached PM: {pm_sends}"
+        assert "line two" in delivered
+        assert "line three" in delivered
+        # No literal newline in the delivered text
+        assert "\n" not in delivered
+
+    async def test_parse_failure_with_dispatch_literal_logs_warning(self, scenario, caplog):
+        """REQ-016 F-04d: when the orchestrator pane contains '<<DISPATCH'
+        but the parser can't extract a valid dispatch, a warning line is
+        emitted so the operator has a breadcrumb trail."""
+        import logging
+        sup = scenario["supervisor"]
+        sm = scenario["sm"]
+        orch_agent = scenario["agents"][AgentRole.orchestrator]
+        orch_pane = scenario["orch_pane"]
+
+        # Malformed dispatch — missing closing quote
+        sm.set_pane_state(
+            orch_pane,
+            '<<DISPATCH role="developer" text="unterminated',
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agent_management.backend.supervisor"):
+            task = asyncio.create_task(
+                sup._dispatch_loop(scenario["group"].id, orch_agent)
+            )
+            await asyncio.sleep(0.05)
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        warning_lines = [
+            r.message for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "<<DISPATCH" in r.message
+            and "parse failed" in r.message
+        ]
+        assert len(warning_lines) >= 1, (
+            f"Expected a parse-failure warning; got: {[r.message for r in caplog.records]}"
+        )
+
+    async def test_parse_failure_warning_deduped(self, scenario, caplog):
+        """REQ-016 F-04d: the same malformed pane content should log only
+        once per unique tail, not once per poll."""
+        import logging
+        sup = scenario["supervisor"]
+        sm = scenario["sm"]
+        orch_agent = scenario["agents"][AgentRole.orchestrator]
+        orch_pane = scenario["orch_pane"]
+
+        sm.set_pane_state(
+            orch_pane,
+            '<<DISPATCH role="developer" text="still-bad',
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agent_management.backend.supervisor"):
+            task = asyncio.create_task(
+                sup._dispatch_loop(scenario["group"].id, orch_agent)
+            )
+            # Give the loop many iterations so it would log many times
+            # without dedup.
+            await asyncio.sleep(0.25)
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        parse_warnings = [
+            r for r in caplog.records
+            if "parse failed" in r.message
+        ]
+        # Should log exactly once (dedup by tail), not once per poll tick.
+        assert len(parse_warnings) == 1, (
+            f"Expected 1 deduped warning, got {len(parse_warnings)}"
+        )
+
+
 class TestTesterFailureLoop:
     async def test_tests_failed_marker_recognised_and_counter_increments(self, scenario):
         """Tester emits <<TESTS_FAILED>> then <<TASK_DONE>>; the result is

@@ -131,6 +131,9 @@ class Supervisor:
         self._workflow_ended: bool = False
         self._step_index: int = 0
         self._dev_tester_retries: int = 0  # for the standard workflow's failure loop
+        # REQ-016 F-04d: remember the last parse-failure tail so we don't spam
+        # the log with the same warning every 500 ms.
+        self._last_parse_warning: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Group lifecycle
@@ -145,24 +148,35 @@ class Supervisor:
         self._workflow_ended = False
         self._step_index = 0
         self._dev_tester_retries = 0
+        self._last_parse_warning = None
         self._stall_notified = False
 
         members = await self._repo.get_group_members(group_id)
         workers = [a for a in members if a.role != AgentRole.orchestrator]
         orch_agent = next((a for a in members if a.role == AgentRole.orchestrator), None)
 
-        # 1. Start workers first.
-        for agent in workers:
-            try:
-                await self._sm.start_agent_session(agent, group_id, resume_session_id=None)
+        # 1. Start all workers concurrently. REQ-016 F-03: previously this was
+        # a for-loop of sequential awaits, which meant 6 agents with 30 s
+        # readiness timeouts could take 3 minutes worst case. asyncio.gather
+        # with return_exceptions=True runs them in parallel and isolates
+        # per-agent failures.
+        results = await asyncio.gather(
+            *[self._sm.start_agent_session(w, group_id, resume_session_id=None)
+              for w in workers],
+            return_exceptions=True,
+        )
+        for worker, result in zip(workers, results):
+            if isinstance(result, Exception):
+                logger.exception(
+                    "Failed to start session for agent %s: %s", worker.name, result,
+                )
+                await self._repo.update_agent_status(worker.id, AgentStatus.degraded)
                 self._app.post_message(AgentStatusChanged(
-                    agent_id=agent.id, status=AgentStatus.active
+                    agent_id=worker.id, status=AgentStatus.degraded
                 ))
-            except Exception:
-                logger.exception("Failed to start session for agent %s", agent.name)
-                await self._repo.update_agent_status(agent.id, AgentStatus.degraded)
+            else:
                 self._app.post_message(AgentStatusChanged(
-                    agent_id=agent.id, status=AgentStatus.degraded
+                    agent_id=worker.id, status=AgentStatus.active
                 ))
 
         # 2. Verify all workers are active before starting the orchestrator.
@@ -205,22 +219,56 @@ class Supervisor:
         self._workflow_ended = False
         self._step_index = 0
         self._dev_tester_retries = 0
+        self._last_parse_warning = None
 
         members = await self._repo.get_group_members(group_id)
         workers = [a for a in members if a.role != AgentRole.orchestrator]
         orch_agent = next((a for a in members if a.role == AgentRole.orchestrator), None)
 
-        for agent in workers + ([orch_agent] if orch_agent else []):
-            try:
-                existing = await self._repo.get_session(agent.id, group_id)
-                resume_id = existing.claude_session_id if existing else None
-                await self._sm.start_agent_session(agent, group_id, resume_session_id=resume_id)
+        # REQ-016 F-03: resume workers concurrently. Fetch each agent's
+        # previous claude_session_id first so the gather call owns no shared
+        # state.
+        resume_ids: list[Optional[str]] = []
+        for w in workers:
+            existing = await self._repo.get_session(w.id, group_id)
+            resume_ids.append(existing.claude_session_id if existing else None)
+
+        results = await asyncio.gather(
+            *[self._sm.start_agent_session(w, group_id, resume_session_id=rid)
+              for w, rid in zip(workers, resume_ids)],
+            return_exceptions=True,
+        )
+        for worker, result in zip(workers, results):
+            if isinstance(result, Exception):
+                logger.exception(
+                    "Failed to resume session for agent %s: %s", worker.name, result,
+                )
+                await self._repo.update_agent_status(worker.id, AgentStatus.degraded)
                 self._app.post_message(AgentStatusChanged(
-                    agent_id=agent.id, status=AgentStatus.active
+                    agent_id=worker.id, status=AgentStatus.degraded
+                ))
+            else:
+                self._app.post_message(AgentStatusChanged(
+                    agent_id=worker.id, status=AgentStatus.active
+                ))
+
+        # Orchestrator resumes serially, after workers are confirmed active
+        # (same reasoning as start_group).
+        if orch_agent is not None:
+            try:
+                existing = await self._repo.get_session(orch_agent.id, group_id)
+                resume_id = existing.claude_session_id if existing else None
+                await self._sm.start_agent_session(
+                    orch_agent, group_id, resume_session_id=resume_id
+                )
+                self._app.post_message(AgentStatusChanged(
+                    agent_id=orch_agent.id, status=AgentStatus.active
                 ))
             except Exception:
-                logger.exception("Failed to resume session for agent %s", agent.name)
-                await self._repo.update_agent_status(agent.id, AgentStatus.degraded)
+                logger.exception(
+                    "Failed to resume orchestrator for group %s", group_id,
+                )
+                await self._repo.update_agent_status(orch_agent.id, AgentStatus.degraded)
 
         if orch_agent:
             self._force_advance_request = asyncio.Event()
@@ -231,17 +279,33 @@ class Supervisor:
             )
 
     async def stop_group(self, group_id: str) -> None:
+        """Stop all sessions in a group concurrently.
+
+        REQ-016 F-03: parallelise via asyncio.gather(return_exceptions=True)
+        so a stuck agent doesn't delay the others.
+        """
         logger.info("Stopping group %s", group_id)
         await self._cancel_dispatch_loop()
         sessions = await self._repo.get_sessions_for_group(group_id)
-        for session in sessions:
-            try:
-                await self._sm.stop_agent_session(session)
+        if not sessions:
+            if self._active_group_id == group_id:
+                self._active_group_id = None
+            return
+
+        results = await asyncio.gather(
+            *[self._sm.stop_agent_session(s) for s in sessions],
+            return_exceptions=True,
+        )
+        for session, result in zip(sessions, results):
+            if isinstance(result, Exception):
+                logger.exception(
+                    "Error stopping session %s: %s", session.id, result,
+                )
+            else:
                 self._app.post_message(AgentStatusChanged(
                     agent_id=session.agent_id, status=AgentStatus.stopped
                 ))
-            except Exception:
-                logger.exception("Error stopping session %s", session.id)
+
         if self._active_group_id == group_id:
             self._active_group_id = None
 
@@ -350,6 +414,19 @@ class Supervisor:
                     # processed (content-signature dedup, scrollback-safe).
                     dispatch = orch_mod.parse_latest_dispatch(pane_text)
                     if dispatch is None:
+                        # REQ-016 F-04d: emit a diagnostic when the pane
+                        # contains the literal "<<DISPATCH" but the parser
+                        # couldn't extract anything. De-duplicate by the
+                        # trailing tail so we don't spam the log.
+                        if "<<DISPATCH" in pane_text:
+                            tail = pane_text[-200:].replace("\n", "\\n")
+                            if tail != self._last_parse_warning:
+                                logger.warning(
+                                    "dispatch_loop: <<DISPATCH seen in orch "
+                                    "pane but parse failed group=%s tail=%r",
+                                    group_id, tail,
+                                )
+                                self._last_parse_warning = tail
                         continue
                     if dispatch.raw == self._last_dispatch_raw:
                         continue
@@ -380,8 +457,14 @@ class Supervisor:
                         self._last_dispatch_raw = dispatch.raw
                         continue
 
-                    # Send the dispatch text to the worker
-                    await self._sm.send_keys(worker_session.tmux_pane_id, dispatch.text)
+                    # REQ-016 F-04c: strip embedded newlines from the dispatch
+                    # text before sending. tmux send-keys interprets \n as
+                    # Enter, which would submit only the first line of a
+                    # multi-line dispatch, dropping the rest. The dispatch text
+                    # is typically single-line anyway; this is defensive
+                    # against LLM output variability.
+                    clean_text = dispatch.text.replace("\r\n", " ").replace("\n", " ")
+                    await self._sm.send_keys(worker_session.tmux_pane_id, clean_text)
                     now = asyncio.get_event_loop().time()
                     in_flight = _InFlight(
                         dispatch=dispatch,
