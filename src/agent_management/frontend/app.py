@@ -199,15 +199,19 @@ class AgentManagementApp(App):
             await grid.mount(pane)
 
     async def _refresh_pane_outputs(self) -> None:
-        """Poll tmux capture-pane for all active agents and update panes."""
+        """Poll tmux capture-pane for all active agents and update panes.
+
+        REQ-015 F-02: capture with `ansi=True` so the AgentPane preview can
+        render colour and bold via Rich's Text.from_ansi.
+        """
         if not self._active_group_id or not self._session_manager:
             return
         sessions = await self._repo.get_sessions_for_group(self._active_group_id)
         for session in sessions:
             if session.tmux_pane_id and session.status == AgentStatus.active:
                 try:
-                    output = await self._session_manager.capture_pane_output(
-                        session.tmux_pane_id
+                    output = await self._session_manager.capture_pane_full(
+                        session.tmux_pane_id, ansi=True
                     )
                     pane_widget = self.query_one(f"#pane-{session.agent_id}", AgentPane)
                     pane_widget.set_output(output)
@@ -406,20 +410,43 @@ class AgentManagementApp(App):
         self.notify("Group deleted.")
         await self._rebuild_panes()
 
-    async def on_agent_pane_send_requested(self, message: AgentPane.SendRequested) -> None:
+    async def on_agent_pane_key_forwarded(
+        self, message: AgentPane.KeyForwarded
+    ) -> None:
+        """REQ-015 F-03: a quick-keyboard button was clicked."""
+        await self._forward_keys_to_agent(message.agent_id, message.spec)
+
+    async def on_input_box_key_forwarded(
+        self, message  # InputBox.KeyForwarded — avoid forward import
+    ) -> None:
+        """REQ-015 F-04: a key was typed inside the InputBox focus catcher."""
+        await self._forward_keys_to_agent(message.agent_id, message.spec)
+
+    async def _forward_keys_to_agent(self, agent_id: str, spec: list[str]) -> None:
+        """Common path for REQ-015 quick keys and input-box forwarding.
+
+        Resolves the agent's active session and calls SessionManager.send_raw_keys
+        with the tmux key spec. Surfaces failures via a toast.
+        """
         if not self._session_manager or not self._active_group_id:
-            self.notify("No active group session.", severity="warning")
             return
         sessions = await self._repo.get_sessions_for_group(self._active_group_id)
         session = next(
             (s for s in sessions
-             if s.agent_id == message.agent_id and s.status == AgentStatus.active),
+             if s.agent_id == agent_id and s.status == AgentStatus.active),
             None,
         )
         if not session or not session.tmux_pane_id:
-            self.notify("Agent is not running.", severity="warning")
+            self.notify("Agent pane gone — restart the agent.", severity="warning")
             return
-        await self._session_manager.send_keys(session.tmux_pane_id, message.text)
+        rc, _, err = await self._session_manager.send_raw_keys(
+            session.tmux_pane_id, *spec
+        )
+        if rc != 0:
+            logger.warning(
+                "send_raw_keys failed for pane %s: %s", session.tmux_pane_id, err
+            )
+            self.notify("Could not send key — agent pane unavailable.", severity="warning")
 
     async def on_agent_pane_restart_requested(self, message: AgentPane.RestartRequested) -> None:
         if not self._supervisor or not self._active_group_id:
