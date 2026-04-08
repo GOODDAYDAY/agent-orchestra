@@ -13,15 +13,20 @@ from typing import Optional
 
 # ---- Regexes -----------------------------------------------------------------
 
-# Match: <<DISPATCH role="developer" text="...">>...<</DISPATCH>>
-# - role: lowercase identifier
-# - text: backslash-escaped quoted string body
-# Captures the entire block so callers can compute its end offset.
+# REQ-016 F-04a — dispatch form accepted by the parser:
+#
+#   <<DISPATCH role="developer" text="...">>              ← preferred (self-closing)
+#   <<DISPATCH role="developer" text="..."/>>             ← with optional trailing slash
+#   <<DISPATCH role="developer" text="...">>body<</DISPATCH>>  ← full form with body + closing tag
+#
+# All three shapes are recognised by a single regex that matches the
+# `<<DISPATCH role="..." text="...">>` prefix. Any trailing body and
+# `<</DISPATCH>>` closing tag are ignored — the dispatch data is fully
+# carried in the role and text attributes, so dropping the full-form regex
+# simplifies the parser and eliminates a pathological greedy match where
+# one full-form regex could eat multiple self-closing dispatches as "body".
 _DISPATCH_RE = re.compile(
-    r'<<DISPATCH\s+role="(?P<role>[a-z_]+)"\s+text="(?P<text>(?:[^"\\]|\\.)*)"\s*>>'
-    r'(?P<body>.*?)'
-    r'<</DISPATCH>>',
-    re.DOTALL,
+    r'<<DISPATCH\s+role="(?P<role>[a-z_]+)"\s+text="(?P<text>(?:[^"\\]|\\.)*)"\s*/?\s*>>',
 )
 
 # A worker has finished when a line starting with <<TASK_DONE>> appears.
@@ -92,12 +97,14 @@ def parse_latest_dispatch(
 ) -> Optional[Dispatch]:
     """Find the *last* dispatch block whose end is after `after_offset`.
 
-    Returns None if no new dispatch is present. The orchestrator may emit only
-    one dispatch per turn but if it produces several, only the most recent
-    counts (the supervisor consumes them in order anyway via offset bookkeeping).
+    REQ-016 F-04a: accepts both self-closing form and full form (with
+    `<</DISPATCH>>` trailer). The parser only captures the `<<DISPATCH ...>>`
+    prefix; any trailing body and closing tag are left to subsequent text.
+    Returns None if no new dispatch is present.
     """
     if after_offset >= len(orchestrator_pane_text):
         return None
+
     last: Optional[Dispatch] = None
     for m in _DISPATCH_RE.finditer(orchestrator_pane_text):
         if m.end() <= after_offset:

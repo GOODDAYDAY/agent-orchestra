@@ -26,7 +26,9 @@ from agent_management.backend.orchestrator import (
 
 class TestParseLatestDispatch:
     def test_well_formed_single_dispatch(self):
-        text = '<<DISPATCH role="developer" text="implement X">>\n<</DISPATCH>>'
+        # REQ-016 F-04a: parser captures just the `<<DISPATCH ...>>` prefix;
+        # any trailing `<</DISPATCH>>` is left for subsequent text.
+        text = '<<DISPATCH role="developer" text="implement X">>'
         d = parse_latest_dispatch(text)
         assert d is not None
         assert d.role == "developer"
@@ -68,18 +70,23 @@ class TestParseLatestDispatch:
         text = '<<DISPATCH role="developer" text="x">><</DISPATCH>>'
         assert parse_latest_dispatch(text).role == "developer"
 
-    def test_malformed_no_closing_tag_returns_none(self):
+    def test_no_closing_tag_accepted_as_self_closing(self):
+        """REQ-016 F-04a: self-closing form (no closing tag) is now valid.
+        Previously this test expected None; the parser was strictened-up."""
         text = '<<DISPATCH role="developer" text="x">> body without close'
-        assert parse_latest_dispatch(text) is None
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.role == "developer"
+        assert d.text == "x"
 
-    def test_dotall_body_can_span_lines(self):
-        # The dispatch block body itself can span multiple lines; the text=
-        # attribute uses simple backslash-quote escaping (no \n shorthand).
-        text = '<<DISPATCH role="pm" text="single line text">>\n  body\n  more body\n<</DISPATCH>>'
+    def test_self_closing_followed_by_arbitrary_text(self):
+        # REQ-016 F-04a: the self-closing parser stops at `>>` and ignores
+        # any trailing text. The raw match contains only the prefix.
+        text = '<<DISPATCH role="pm" text="single line text">>\n  some body\n  more body\n<</DISPATCH>>'
         d = parse_latest_dispatch(text)
         assert d is not None
         assert d.text == "single line text"
-        assert "more body" in d.raw
+        assert d.raw == '<<DISPATCH role="pm" text="single line text">>'
 
 
 # ---- workflow control markers ------------------------------------------------
@@ -317,11 +324,12 @@ class TestParseLatestDispatchEdge:
         assert d.text == "实现用户登录"
 
     def test_dispatch_at_end_of_string(self):
-        text = 'some preamble\n<<DISPATCH role="pm" text="final">><</DISPATCH>>'
+        # REQ-016 F-04a: the parser stops at `>>` so end_offset points there,
+        # not at the position after any trailing closing tag.
+        text = 'some preamble\n<<DISPATCH role="pm" text="final">>'
         d = parse_latest_dispatch(text)
         assert d is not None
         assert d.role == "pm"
-        # end_offset should point to the end of the whole dispatch block
         assert d.end_offset == len(text)
 
     def test_trailing_whitespace_after_dispatch(self):
@@ -466,3 +474,84 @@ class TestDetectCompletionEdge:
         )
         assert result.layer == CompletionLayer.marker
         assert len(result.artifact) == 100_000
+
+
+# ---- REQ-016 F-04a: self-closing dispatch form -----------------------------
+
+class TestSelfClosingDispatch:
+    def test_self_closing_no_slash(self):
+        text = '<<DISPATCH role="developer" text="do thing">>'
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.role == "developer"
+        assert d.text == "do thing"
+
+    def test_self_closing_with_slash(self):
+        text = '<<DISPATCH role="product_manager" text="analyse"/>>'
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.role == "product_manager"
+        assert d.text == "analyse"
+
+    def test_self_closing_with_extra_whitespace(self):
+        text = '<<DISPATCH  role="tech_director"  text="design"   />>'
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.role == "tech_director"
+
+    def test_full_form_still_works(self):
+        text = '<<DISPATCH role="tester" text="run tests">>body<</DISPATCH>>'
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.role == "tester"
+        assert d.text == "run tests"
+
+    def test_full_form_parsed_as_self_closing_prefix(self):
+        # REQ-016 F-04a: the parser now treats all dispatch shapes uniformly —
+        # it captures the `<<DISPATCH ...>>` prefix and ignores any trailing
+        # body + `<</DISPATCH>>`. The returned Dispatch's raw is just the
+        # prefix; the body is available to the rest of the pane text.
+        text = '<<DISPATCH role="developer" text="x">>body<</DISPATCH>>'
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.role == "developer"
+        assert d.text == "x"
+        # Raw is the prefix only — not the body or closing tag.
+        assert d.raw == '<<DISPATCH role="developer" text="x">>'
+
+    def test_self_closing_followed_by_text(self):
+        # Dispatch followed by orchestrator's own commentary
+        text = (
+            '<<DISPATCH role="developer" text="implement">>\n'
+            "some narration from the orchestrator after the dispatch"
+        )
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.role == "developer"
+        assert d.text == "implement"
+
+    def test_multiple_self_closing_returns_last(self):
+        text = (
+            '<<DISPATCH role="pm" text="first">>\n'
+            '<<DISPATCH role="developer" text="second">>'
+        )
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.role == "developer"
+        assert d.text == "second"
+
+    def test_mixed_forms_later_wins(self):
+        text = (
+            '<<DISPATCH role="pm" text="first">>\n'
+            '<<DISPATCH role="developer" text="second">>body<</DISPATCH>>'
+        )
+        d = parse_latest_dispatch(text)
+        assert d is not None
+        assert d.role == "developer"
+
+    def test_after_offset_respected(self):
+        text = '<<DISPATCH role="pm" text="old">>'
+        d1 = parse_latest_dispatch(text)
+        assert d1 is not None
+        # Consume up to end of first dispatch; no new dispatch after it.
+        assert parse_latest_dispatch(text, after_offset=d1.end_offset) is None
