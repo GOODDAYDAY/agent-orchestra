@@ -41,6 +41,42 @@ del _i
 
 # ---- Public API --------------------------------------------------------------
 
+def tmux_args_for_key(event) -> Optional[list[str]]:
+    """Resolve a Textual events.Key into a tmux send-keys argv list.
+
+    REQ-016 F-02 — the previous implementation only looked at `event.key`.
+    Textual reports shift-modified punctuation like `!@#$%^&*()` via
+    `event.key="exclamation_mark"` etc. while `event.character` holds the
+    actual typed character "!". Dropping those led to silent failures where
+    punctuation never reached the agent.
+
+    Priority order:
+      1. Named special keys and ctrl combinations → use `event.key` because
+         it gives precise tmux key names (Enter, Tab, Up, C-c, ...).
+      2. Printable typed characters → prefer `event.character`.
+      3. Fallback → `event.key` (older Textual versions that only set key).
+
+    Returns None (never raises) for anything we can't resolve; callers drop
+    the keystroke silently.
+    """
+    key_name: str = getattr(event, "key", "") or ""
+
+    # 1. Named specials and ctrl combos — event.key is authoritative.
+    if key_name in _SPECIAL or key_name.startswith("ctrl+"):
+        return textual_to_tmux(key_name)
+
+    # 2. Printable character input — prefer event.character.
+    character = getattr(event, "character", None)
+    if character is not None and character != "" and character.isprintable():
+        return textual_to_tmux(character)
+
+    # 3. Fallback — older Textual versions may only set event.key.
+    if key_name:
+        return textual_to_tmux(key_name)
+
+    return None
+
+
 def textual_to_tmux(event_key: str) -> Optional[list[str]]:
     """Map a Textual `events.Key.key` string to a tmux send-keys argv list.
 

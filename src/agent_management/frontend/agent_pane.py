@@ -30,7 +30,7 @@ from textual.reactive import reactive
 from textual.widgets import Button, Label, RichLog, Static
 
 from agent_management.backend.models import Agent, AgentRole, AgentStatus
-from agent_management.frontend.key_forwarding import textual_to_tmux
+from agent_management.frontend.key_forwarding import textual_to_tmux, tmux_args_for_key
 from agent_management.shared.config import OUTPUT_BUFFER_LINES
 
 
@@ -121,7 +121,9 @@ class InputBox(Static):
         self._echo: str = ""
 
     async def on_key(self, event: events.Key) -> None:
-        spec = textual_to_tmux(event.key)
+        # REQ-016 F-02: use the event.character-aware helper so shift-modified
+        # punctuation (!, @, #, ...) forwards correctly.
+        spec = tmux_args_for_key(event)
         if spec is None:
             return  # let it bubble (we don't recognise it)
 
@@ -147,14 +149,17 @@ class InputBox(Static):
         self.post_message(self.KeyForwarded(agent_id=self.agent_id, spec=spec))
 
         # Local echo for visual feedback (independent of capture-pane refresh).
+        # REQ-016 F-02: prefer event.character for the displayed text so
+        # punctuation via Shift+<key> shows correctly.
+        display_char = getattr(event, "character", None) or event.key
         if event.key == "enter":
             self._reset_echo()
         elif event.key == "backspace":
             if self._echo:
                 self._echo = self._echo[:-1]
                 self._render_echo()
-        elif len(event.key) == 1 and event.key.isprintable():
-            self._echo += event.key
+        elif display_char and len(display_char) == 1 and display_char.isprintable():
+            self._echo += display_char
             self._render_echo()
 
     def on_blur(self) -> None:
@@ -212,10 +217,17 @@ class AgentPane(Vertical):
         padding: 0;
         background: $surface-darken-1;
     }
+    /* REQ-016 F-01: admin row is collapsible via a toggle button. */
+    AgentPane .pane-controls.collapsed {
+        display: none;
+    }
     AgentPane .pane-quickkeys {
         height: 1;
         padding: 0;
         background: $surface-darken-1;
+    }
+    AgentPane Button.admin-toggle {
+        width: auto;
     }
     AgentPane Button#enter-agent {
         display: none;
@@ -299,6 +311,16 @@ class AgentPane(Vertical):
                 classes="status-badge",
             )
             yield Label("", id=f"role-marker-{self.agent.id}", classes="role-marker")
+            # REQ-016 F-01: admin toggle button + Enter button promoted into
+            # the header so Enter stays accessible when the admin row is
+            # collapsed.
+            yield Button(
+                "⋯",
+                id=f"btn-admin-toggle-{self.agent.id}",
+                classes="admin-toggle",
+                compact=True,
+            )
+            yield Button("Enter", id="enter-agent", variant="primary", compact=True)
 
         # REQ-015 F-02: read-only preview, focusable so Enter triggers Attach.
         yield RichLog(
@@ -318,14 +340,15 @@ class AgentPane(Vertical):
             compact=True,
         )
 
-        # Admin controls row (existing buttons).
-        with Horizontal(classes="pane-controls"):
+        # REQ-016 F-01: admin controls row is now collapsible. Default state
+        # is collapsed; user clicks the ⋯ toggle in the header to reveal.
+        # Enter button moved to the header so it stays visible.
+        with Horizontal(classes="pane-controls collapsed", id=f"controls-{self.agent.id}"):
             yield Button("Pause",   id=f"btn-pause-{self.agent.id}",   variant="warning", compact=True)
             yield Button("Resume",  id=f"btn-resume-{self.agent.id}",  variant="success", compact=True)
             yield Button("Edit",    id=f"btn-edit-{self.agent.id}",    variant="default", compact=True)
             yield Button("Restart", id=f"btn-restart-{self.agent.id}", variant="error",   compact=True)
             yield Button("Delete",  id=f"btn-delete-{self.agent.id}",  variant="error",   compact=True)
-            yield Button("Enter",   id="enter-agent",                   variant="primary", compact=True)
 
         # REQ-015 F-03: quick keyboard row.
         with Horizontal(classes="pane-quickkeys"):
@@ -452,6 +475,19 @@ class AgentPane(Vertical):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""
         aid = self.agent.id
+
+        # REQ-016 F-01: admin toggle button — flip the collapsed class on
+        # the controls row.
+        if bid == f"btn-admin-toggle-{aid}":
+            try:
+                controls = self.query_one(f"#controls-{aid}", Horizontal)
+            except Exception:
+                return
+            if "collapsed" in controls.classes:
+                controls.remove_class("collapsed")
+            else:
+                controls.add_class("collapsed")
+            return
 
         # Admin controls (existing wiring)
         if bid == f"btn-pause-{aid}":

@@ -244,6 +244,94 @@ class TestRemovedWidgets:
 
 # ---- AgentPane orchestrator marker ------------------------------------------
 
+# ---- REQ-016 F-01: collapsible admin row -----------------------------------
+
+class TestAdminRowCollapse:
+    async def test_admin_row_collapsed_by_default(self):
+        agent = _make_agent()
+        app = _HostApp(lambda: AgentPane(agent=agent))
+        async with app.run_test():
+            pane = app.query_one(AgentPane)
+            controls = pane.query_one(f"#controls-{agent.id}")
+            assert "collapsed" in controls.classes
+
+    async def test_admin_toggle_button_present_in_header(self):
+        agent = _make_agent()
+        app = _HostApp(lambda: AgentPane(agent=agent))
+        async with app.run_test():
+            pane = app.query_one(AgentPane)
+            btn = pane.query_one(f"#btn-admin-toggle-{agent.id}", Button)
+            assert btn is not None
+
+    async def test_clicking_toggle_expands_controls(self):
+        agent = _make_agent()
+        app = _HostApp(lambda: AgentPane(agent=agent))
+        async with app.run_test() as pilot:
+            pane = app.query_one(AgentPane)
+            controls = pane.query_one(f"#controls-{agent.id}")
+            assert "collapsed" in controls.classes
+            btn = pane.query_one(f"#btn-admin-toggle-{agent.id}", Button)
+            btn.press()
+            await pilot.pause()
+            assert "collapsed" not in controls.classes
+
+    async def test_clicking_toggle_twice_collapses_again(self):
+        agent = _make_agent()
+        app = _HostApp(lambda: AgentPane(agent=agent))
+        async with app.run_test() as pilot:
+            pane = app.query_one(AgentPane)
+            controls = pane.query_one(f"#controls-{agent.id}")
+            btn = pane.query_one(f"#btn-admin-toggle-{agent.id}", Button)
+            btn.press()
+            await pilot.pause()
+            btn.press()
+            await pilot.pause()
+            assert "collapsed" in controls.classes
+
+    async def test_enter_button_in_header_not_admin_row(self):
+        agent = _make_agent()
+        app = _HostApp(lambda: AgentPane(agent=agent))
+        async with app.run_test():
+            pane = app.query_one(AgentPane)
+            enter_btn = pane.query_one("#enter-agent", Button)
+            # The enter button's parent should be the pane-header Horizontal,
+            # not the pane-controls row.
+            parent_classes = set(enter_btn.parent.classes) if enter_btn.parent else set()
+            assert "pane-header" in parent_classes
+            assert "pane-controls" not in parent_classes
+
+
+# ---- REQ-016 F-02: punctuation forwarding regression guard -----------------
+
+class TestInputBoxPunctuationForwarding:
+    async def test_exclamation_mark_forwarded_via_character(self):
+        """Regression guard: shift-modified punctuation must be forwarded
+        even when Textual reports event.key as a named identifier and
+        event.character holds the real character."""
+        from agent_management.frontend.key_forwarding import tmux_args_for_key
+        from types import SimpleNamespace
+        # Synthesize what Textual would emit on Shift+1
+        fake = SimpleNamespace(key="exclamation_mark", character="!")
+        assert tmux_args_for_key(fake) == ["!"]
+
+    async def test_punctuation_family_via_character(self):
+        from agent_management.frontend.key_forwarding import tmux_args_for_key
+        from types import SimpleNamespace
+        for ch in "!@#$%^&*()_+-=[]{};:'\",.<>/?\\|`~":
+            fake = SimpleNamespace(key=f"synthetic-{ch}", character=ch)
+            assert tmux_args_for_key(fake) == [ch], f"failed for {ch!r}"
+
+    async def test_input_box_uses_tmux_args_for_key(self):
+        """When the user types 'a' into the input box (both key and character
+        set), the InputBox must forward the character via the new helper."""
+        app = _HostApp(lambda: InputBox(agent_id="A1", id="ib"))
+        async with app.run_test() as pilot:
+            ib = app.query_one("#ib", InputBox)
+            ib.focus()
+            await pilot.press("a")
+            assert ("A1", ["a"]) in app.forwarded
+
+
 class TestAgentPaneRoleMarker:
     @staticmethod
     def _label_text(label) -> str:

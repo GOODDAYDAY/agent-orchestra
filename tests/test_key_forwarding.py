@@ -5,7 +5,10 @@ import string
 
 import pytest
 
-from agent_management.frontend.key_forwarding import textual_to_tmux
+from agent_management.frontend.key_forwarding import (
+    textual_to_tmux,
+    tmux_args_for_key,
+)
 
 
 # ---- Special keys ------------------------------------------------------------
@@ -131,6 +134,92 @@ class TestGarbage:
 
 
 # ---- API contract -----------------------------------------------------------
+
+# ---- REQ-016 F-02: tmux_args_for_key (event-aware) ------------------------
+
+from types import SimpleNamespace
+
+
+def _key(key: str, character=None):
+    """Build a fake Textual events.Key-compatible stub."""
+    return SimpleNamespace(key=key, character=character)
+
+
+class TestTmuxArgsForKey:
+    def test_named_special_enter(self):
+        assert tmux_args_for_key(_key("enter", None)) == ["Enter"]
+
+    def test_named_special_tab(self):
+        assert tmux_args_for_key(_key("tab", None)) == ["Tab"]
+
+    def test_ctrl_c_via_key(self):
+        assert tmux_args_for_key(_key("ctrl+c", None)) == ["C-c"]
+
+    def test_letter_via_key_only(self):
+        # event.character unset — fall back to event.key
+        assert tmux_args_for_key(_key("a", None)) == ["a"]
+
+    def test_letter_via_character_priority(self):
+        # Newer Textual sets character for printable keys
+        assert tmux_args_for_key(_key("a", "a")) == ["a"]
+
+    def test_shift_exclamation_via_character(self):
+        # THIS is the REQ-016 F-02 regression guard: Textual reports the
+        # shifted key as key="exclamation_mark" but character="!". The fix
+        # is to prefer character for printable input.
+        assert tmux_args_for_key(_key("exclamation_mark", "!")) == ["!"]
+
+    def test_shift_digits_punctuation_via_character(self):
+        shifts = {
+            "exclamation_mark": "!",
+            "at": "@",
+            "hash": "#",
+            "dollar_sign": "$",
+            "percent_sign": "%",
+            "caret": "^",
+            "ampersand": "&",
+            "asterisk": "*",
+            "left_parenthesis": "(",
+            "right_parenthesis": ")",
+        }
+        for key_name, character in shifts.items():
+            assert tmux_args_for_key(_key(key_name, character)) == [character], (
+                f"failed for key={key_name} char={character}"
+            )
+
+    def test_bracket_family_via_character(self):
+        for ch in "[]{}":
+            assert tmux_args_for_key(_key(f"named_{ch}", ch)) == [ch]
+
+    def test_punctuation_family_via_character(self):
+        for ch in ";:'\"<>,./?\\|`~-_=+":
+            assert tmux_args_for_key(_key(f"named_{ch}", ch)) == [ch]
+
+    def test_unicode_via_character(self):
+        # IME composition: key name is synthetic, character carries the real text
+        assert tmux_args_for_key(_key("ime", "你")) == ["你"]
+
+    def test_multi_char_unicode_via_character(self):
+        assert tmux_args_for_key(_key("ime", "你好")) == ["你好"]
+
+    def test_character_none_falls_back_to_key(self):
+        # Older Textual may not populate event.character
+        assert tmux_args_for_key(_key("a", None)) == ["a"]
+
+    def test_empty_event(self):
+        assert tmux_args_for_key(_key("", None)) is None
+
+    def test_unrecognised_garbage(self):
+        assert tmux_args_for_key(_key("super+meta+chord", None)) is None
+
+    def test_named_special_wins_over_character(self):
+        # Even if Textual sets event.character for a named special, we keep
+        # using event.key because it gives the precise tmux spec.
+        assert tmux_args_for_key(_key("enter", "\n")) == ["Enter"]
+
+    def test_ctrl_combination_wins_over_character(self):
+        assert tmux_args_for_key(_key("ctrl+a", "a")) == ["C-a"]
+
 
 class TestApiContract:
     def test_never_raises_on_garbage(self):
