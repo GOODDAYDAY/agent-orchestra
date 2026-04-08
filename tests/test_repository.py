@@ -375,41 +375,136 @@ class TestRoleTemplateUserEdits:
         assert "<<TASK_DONE>>" in dev.system_prompt
 
 
-# ---- REQ-016 F-05: template version bump + /req-* references --------------
+# ---- REQ-017: orchestrator autonomy restored; template version bumped ------
 
-class TestReq016TemplateVersion:
-    async def test_template_version_is_6(self, repo: Repository):
-        assert Repository._TEMPLATE_VERSION == 6
 
-    async def test_orchestrator_template_has_skill_section(self, repo: Repository):
+class TestReq017TemplateVersion:
+    async def test_template_version_is_7(self, repo: Repository):
+        assert Repository._TEMPLATE_VERSION == 7
+
+
+class TestReq017OrchestratorTemplate:
+    """REQ-017 F-04: orchestrator template emphasises autonomous
+    decision-making and carries a SKILL_CATALOGUE placeholder instead of
+    hardcoded per-step skill directives."""
+
+    async def test_orchestrator_template_has_skill_catalogue_placeholder(
+        self, repo: Repository,
+    ):
         prompt = await repo.get_orchestrator_template()
-        assert "技能调用规则" in prompt
-        assert "/req-" in prompt
+        assert "{{SKILL_CATALOGUE}}" in prompt
 
-    async def test_orchestrator_template_lists_common_skills(self, repo: Repository):
+    async def test_orchestrator_template_has_autonomous_language(
+        self, repo: Repository,
+    ):
         prompt = await repo.get_orchestrator_template()
-        for skill in ["/req-1-analyze", "/req-2-tech", "/req-3-code", "/req-7-verify"]:
-            assert skill in prompt, f"{skill} missing from orchestrator template"
+        # Explicit autonomy language — this is the key architectural marker
+        assert "自主编排者" in prompt
 
-    async def test_pm_template_mentions_req1_analyze(self, repo: Repository):
+    async def test_orchestrator_template_describes_workflow_as_reference(
+        self, repo: Repository,
+    ):
+        prompt = await repo.get_orchestrator_template()
+        assert "参考模板" in prompt or "参考" in prompt
+
+    async def test_orchestrator_template_still_has_existing_placeholders(
+        self, repo: Repository,
+    ):
+        prompt = await repo.get_orchestrator_template()
+        assert "{{WORKFLOW_DEFINITION}}" in prompt
+        assert "{{WORKER_ROSTER}}" in prompt
+        assert "{{COMPLETION_MARKER}}" in prompt
+
+    async def test_orchestrator_template_does_not_hardcode_must_invoke_per_step(
+        self, repo: Repository,
+    ):
+        # REQ-016 introduced "⚡ must invoke /req-X" wording tied to
+        # per-step skill field; that wording is reverted in REQ-017.
+        prompt = await repo.get_orchestrator_template()
+        assert "⚡ must invoke" not in prompt
+
+
+class TestReq017WorkerTemplatesHideOrchestrator:
+    """REQ-017 F-05: worker templates must hide the orchestrator abstraction
+    entirely — no mention of 'Orchestrator', no hardcoded /req-* skill names,
+    no 'run chain of req-3 → req-7' instructions."""
+
+    _WORKER_ROLES = [
+        AgentRole.product_manager,
+        AgentRole.tech_director,
+        AgentRole.developer,
+        AgentRole.tester,
+    ]
+
+    async def _workers(self, repo: Repository):
         templates = await repo.get_role_templates()
-        pm = next(t for t in templates if t.role == AgentRole.product_manager)
-        assert "技能调用规则" in pm.system_prompt
-        assert "/req-" in pm.system_prompt
+        return [t for t in templates if t.role in self._WORKER_ROLES]
 
-    async def test_tech_director_template_mentions_skill_rule(self, repo: Repository):
-        templates = await repo.get_role_templates()
-        td = next(t for t in templates if t.role == AgentRole.tech_director)
-        assert "技能调用规则" in td.system_prompt
+    async def test_no_worker_mentions_orchestrator(self, repo: Repository):
+        for tpl in await self._workers(repo):
+            assert "Orchestrator" not in tpl.system_prompt, (
+                f"{tpl.role.value} template leaks the orchestrator abstraction"
+            )
 
-    async def test_developer_template_lists_full_req_pipeline(self, repo: Repository):
+    async def test_no_worker_hardcodes_specific_req_skill(self, repo: Repository):
+        # Individual /req-* skill names should not appear in worker templates;
+        # the orchestrator decides skills at runtime.
+        specific_skills = [
+            "/req-1-analyze", "/req-2-tech", "/req-3-code",
+            "/req-4-security", "/req-5-cleanup", "/req-6-review",
+            "/req-7-verify", "/req-8-done",
+        ]
+        for tpl in await self._workers(repo):
+            for skill in specific_skills:
+                assert skill not in tpl.system_prompt, (
+                    f"{tpl.role.value} template hardcodes {skill}; "
+                    "skill selection is the orchestrator's runtime decision"
+                )
+
+    async def test_developer_template_does_not_contain_chain_instruction(
+        self, repo: Repository,
+    ):
         templates = await repo.get_role_templates()
         dev = next(t for t in templates if t.role == AgentRole.developer)
-        for skill in ["/req-3-code", "/req-4-security", "/req-5-cleanup",
-                      "/req-6-review", "/req-7-verify"]:
-            assert skill in dev.system_prompt, f"{skill} missing from developer template"
+        # The REQ-016 chain language must be gone
+        assert "req-3-code → req-4-security" not in dev.system_prompt
+        assert "/req-4-security" not in dev.system_prompt
+        assert "按顺序依次调用" not in dev.system_prompt
 
-    async def test_tester_template_mentions_req7_verify(self, repo: Repository):
-        templates = await repo.get_role_templates()
-        tester = next(t for t in templates if t.role == AgentRole.tester)
-        assert "/req-7-verify" in tester.system_prompt
+    async def test_workers_still_have_task_done_rule(self, repo: Repository):
+        for tpl in await self._workers(repo):
+            assert "<<TASK_DONE>>" in tpl.system_prompt
+
+    async def test_workers_mention_generic_skill_invocation_rule(
+        self, repo: Repository,
+    ):
+        # They should still say "if the task mentions a /req-X-Y skill,
+        # invoke it" — but genericly, with no specific name.
+        for tpl in await self._workers(repo):
+            assert "/req-X-Y" in tpl.system_prompt, (
+                f"{tpl.role.value} template missing generic skill invocation rule"
+            )
+
+    async def test_no_worker_still_mentions_worker_result(self, repo: Repository):
+        for tpl in await self._workers(repo):
+            assert "[WORKER_RESULT" not in tpl.system_prompt, (
+                f"{tpl.role.value} template leaks internal messaging format"
+            )
+
+
+class TestReq017OrchestratorStillHasSkillReferences:
+    """The catalogue is rendered into the orchestrator's prompt, so specific
+    skill names DO appear there — just not in worker templates."""
+
+    async def test_orchestrator_template_mentions_dispatch_format(
+        self, repo: Repository,
+    ):
+        prompt = await repo.get_orchestrator_template()
+        assert "DISPATCH" in prompt
+
+    async def test_orchestrator_template_documents_stall_abort_handling(
+        self, repo: Repository,
+    ):
+        prompt = await repo.get_orchestrator_template()
+        assert "WORKFLOW_COMPLETE" in prompt
+        assert "WORKFLOW_ABORT" in prompt

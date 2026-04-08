@@ -114,6 +114,43 @@ class TestRenderOrchestratorPrompt:
         assert "{{WORKFLOW_DEFINITION}}" not in rendered
         assert "{{WORKER_ROSTER}}" not in rendered
         assert "{{COMPLETION_MARKER}}" not in rendered
+        # REQ-017: the skill catalogue placeholder must be substituted too
+        assert "{{SKILL_CATALOGUE}}" not in rendered
+
+    async def test_skill_catalogue_substituted_with_req_skills(
+        self, repo: Repository, group_with_workers,
+    ):
+        """REQ-017 F-07: the rendered orchestrator prompt contains the
+        full skill catalogue — the orchestrator's LLM reads this as its
+        available toolkit and picks dynamically."""
+        group, agents = group_with_workers
+        sm = SessionManager(repo)
+        rendered = await sm._render_orchestrator_prompt(
+            agents[AgentRole.orchestrator], group.id
+        )
+        for skill in [
+            "/req-1-analyze",
+            "/req-2-tech",
+            "/req-3-code",
+            "/req-4-security",
+            "/req-5-cleanup",
+            "/req-6-review",
+            "/req-7-verify",
+            "/req-8-done",
+        ]:
+            assert skill in rendered, (
+                f"rendered orchestrator prompt missing {skill} from catalogue"
+            )
+
+    async def test_rendered_prompt_has_autonomous_language(
+        self, repo: Repository, group_with_workers,
+    ):
+        group, agents = group_with_workers
+        sm = SessionManager(repo)
+        rendered = await sm._render_orchestrator_prompt(
+            agents[AgentRole.orchestrator], group.id
+        )
+        assert "自主编排者" in rendered
 
     async def test_completion_marker_replaced_with_literal(
         self, repo: Repository, group_with_workers,

@@ -182,55 +182,88 @@ class TestRequiredRolesConsistency:
             assert workflows.get_workflow(wf_id) is workflows.BUILT_IN_WORKFLOWS[wf_id]
 
 
-# ---- REQ-016 F-05: Step.skill field ----------------------------------------
+# ---- REQ-017: Step.skill removed; skill catalogue is the orchestrator's
+# toolkit; render_for_orchestrator no longer emits skill directives ----------
 
-class TestStepSkillField:
-    def test_standard_pm_has_req1_analyze(self):
+class TestStepHasNoSkillField:
+    """REQ-017 F-01: skill selection is the orchestrator's runtime decision,
+    not a per-step hardcoding. Step must not carry any skill attribute."""
+
+    def test_step_dataclass_has_no_skill_field(self):
+        # dataclasses.fields lists the declared fields
+        import dataclasses
+        field_names = {f.name for f in dataclasses.fields(workflows.Step)}
+        assert "skill" not in field_names
+
+    def test_standard_pm_step_has_no_skill_attribute(self):
         pm_step = next(
             s for s in workflows.STANDARD.steps if s.role == AgentRole.product_manager
         )
-        assert pm_step.skill == "req-1-analyze"
+        assert not hasattr(pm_step, "skill")
 
-    def test_standard_tech_director_has_req2_tech(self):
-        td_step = next(
-            s for s in workflows.STANDARD.steps if s.role == AgentRole.tech_director
-        )
-        assert td_step.skill == "req-2-tech"
+    def test_standard_all_steps_have_no_skill_attribute(self):
+        for step in workflows.STANDARD.steps:
+            assert not hasattr(step, "skill")
 
-    def test_standard_developer_has_req3_code(self):
-        dev_step = next(
-            s for s in workflows.STANDARD.steps if s.role == AgentRole.developer
-        )
-        assert dev_step.skill == "req-3-code"
+    def test_prototype_all_steps_have_no_skill_attribute(self):
+        for step in workflows.PROTOTYPE.steps:
+            assert not hasattr(step, "skill")
 
-    def test_standard_tester_has_req7_verify(self):
-        tester_step = next(
-            s for s in workflows.STANDARD.steps if s.role == AgentRole.tester
-        )
-        assert tester_step.skill == "req-7-verify"
+    def test_research_all_steps_have_no_skill_attribute(self):
+        for step in workflows.RESEARCH.steps:
+            assert not hasattr(step, "skill")
 
-    def test_standard_user_has_no_skill(self):
-        user_step = next(
-            s for s in workflows.STANDARD.steps if s.role == AgentRole.user
-        )
-        assert user_step.skill is None
 
-    def test_prototype_developer_has_req3_code(self):
-        dev_step = next(
-            s for s in workflows.PROTOTYPE.steps if s.role == AgentRole.developer
-        )
-        assert dev_step.skill == "req-3-code"
+class TestAvailableSkillsCatalogue:
+    """REQ-017 F-02: the orchestrator chooses from a data catalogue,
+    not a per-step hardcoded mapping."""
 
-    def test_research_pm_and_tech_director_have_skills(self):
-        for role, expected in [
-            (AgentRole.product_manager, "req-1-analyze"),
-            (AgentRole.tech_director, "req-2-tech"),
+    def test_catalogue_exists(self):
+        assert hasattr(workflows, "AVAILABLE_SKILLS")
+        assert len(workflows.AVAILABLE_SKILLS) >= 8
+
+    def test_catalogue_contains_core_req_skills(self):
+        names = {name for name, _desc in workflows.AVAILABLE_SKILLS}
+        for skill in [
+            "/req-1-analyze",
+            "/req-2-tech",
+            "/req-3-code",
+            "/req-4-security",
+            "/req-5-cleanup",
+            "/req-6-review",
+            "/req-7-verify",
+            "/req-8-done",
         ]:
-            step = next(s for s in workflows.RESEARCH.steps if s.role == role)
-            assert step.skill == expected
+            assert skill in names, f"catalogue missing {skill}"
+
+    def test_catalogue_entries_have_descriptions(self):
+        for name, description in workflows.AVAILABLE_SKILLS:
+            assert name.startswith("/req-")
+            assert isinstance(description, str)
+            assert len(description) > 10  # non-trivial description
+
+    def test_render_skill_catalogue_non_empty(self):
+        rendered = workflows.render_skill_catalogue()
+        assert rendered
+        assert len(rendered) > 0
+
+    def test_render_skill_catalogue_contains_all_skills(self):
+        rendered = workflows.render_skill_catalogue()
+        for name, _desc in workflows.AVAILABLE_SKILLS:
+            assert name in rendered
+
+    def test_render_skill_catalogue_contains_descriptions(self):
+        rendered = workflows.render_skill_catalogue()
+        for _name, description in workflows.AVAILABLE_SKILLS:
+            # at least a meaningful fragment of each description should be present
+            fragment = description.split(".")[0][:40]
+            assert fragment in rendered, f"description fragment missing: {fragment!r}"
 
 
-class TestRenderSkillAnnotation:
+class TestRenderForOrchestratorNoSkillLines:
+    """REQ-017 F-03: render_for_orchestrator must NOT emit skill directives.
+    Skill selection is now the orchestrator LLM's runtime decision."""
+
     def _roster(self):
         return [
             (AgentRole.product_manager, "PM", "%1"),
@@ -240,22 +273,29 @@ class TestRenderSkillAnnotation:
             (AgentRole.user, "User", "%5"),
         ]
 
-    def test_render_includes_req1_analyze_for_pm_step(self):
+    def test_render_does_not_contain_must_invoke(self):
         rendered = workflows.render_for_orchestrator(workflows.STANDARD, self._roster())
-        assert "/req-1-analyze" in rendered
-        assert "must invoke" in rendered
+        assert "must invoke" not in rendered
+        assert "⚡" not in rendered
 
-    def test_render_includes_all_standard_skills(self):
+    def test_render_does_not_contain_any_req_skill_name(self):
         rendered = workflows.render_for_orchestrator(workflows.STANDARD, self._roster())
-        for skill in ["req-1-analyze", "req-2-tech", "req-3-code", "req-7-verify"]:
-            assert f"/{skill}" in rendered, f"{skill} missing from render"
+        for skill in [
+            "/req-1-analyze", "/req-2-tech", "/req-3-code",
+            "/req-4-security", "/req-5-cleanup", "/req-6-review",
+            "/req-7-verify", "/req-8-done",
+        ]:
+            assert skill not in rendered, (
+                f"render should not hardcode {skill} — skills are orchestrator's choice"
+            )
 
-    def test_render_user_step_marked_no_skill(self):
+    def test_render_still_contains_role_names_and_descriptions(self):
         rendered = workflows.render_for_orchestrator(workflows.STANDARD, self._roster())
-        assert "no skill — human review" in rendered
+        assert "product_manager" in rendered
+        assert "developer" in rendered
+        assert "tester" in rendered
 
-    def test_prototype_render(self):
-        rendered = workflows.render_for_orchestrator(workflows.PROTOTYPE, self._roster())
-        assert "/req-3-code" in rendered
-        # User step → no skill note
-        assert "no skill — human review" in rendered
+    def test_render_still_contains_failure_loop_metadata(self):
+        rendered = workflows.render_for_orchestrator(workflows.STANDARD, self._roster())
+        assert "<<TESTS_FAILED>>" in rendered
+        assert "loop back" in rendered
