@@ -224,6 +224,11 @@ class SessionManager:
         rendered = rendered.replace(
             "{{WORKER_ROSTER}}", workflows.render_roster(roster)
         )
+        # REQ-017: substitute the skill catalogue so the orchestrator knows
+        # the available toolkit and can pick skills dynamically per dispatch.
+        rendered = rendered.replace(
+            "{{SKILL_CATALOGUE}}", workflows.render_skill_catalogue()
+        )
         rendered = rendered.replace("{{COMPLETION_MARKER}}", COMPLETION_MARKER)
         return rendered
 
