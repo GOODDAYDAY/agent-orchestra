@@ -221,6 +221,115 @@ class TestRenderOrchestratorPrompt:
         with pytest.raises(RuntimeError, match="requires roles"):
             await sm._render_orchestrator_prompt(orch, group.id)
 
+    async def test_send_raw_keys_invokes_tmux_correctly(
+        self, repo: Repository, monkeypatch,
+    ):
+        """REQ-015 F-07: send_raw_keys must call tmux send-keys with the
+        provided argv tokens, no trailing Enter, no payload sanitisation."""
+        sm = SessionManager(repo)
+        recorded_args: list[tuple] = []
+
+        async def fake_tmux(*args):
+            recorded_args.append(args)
+            return 0, "", ""
+
+        monkeypatch.setattr(sm, "_tmux", fake_tmux)
+
+        rc, _, _ = await sm.send_raw_keys("%42", "C-c")
+        assert rc == 0
+        assert recorded_args == [("send-keys", "-t", "%42", "C-c")]
+
+    async def test_send_raw_keys_with_multiple_args(
+        self, repo: Repository, monkeypatch,
+    ):
+        sm = SessionManager(repo)
+        recorded_args: list[tuple] = []
+
+        async def fake_tmux(*args):
+            recorded_args.append(args)
+            return 0, "", ""
+
+        monkeypatch.setattr(sm, "_tmux", fake_tmux)
+        await sm.send_raw_keys("%1", "y", "Enter")
+        assert recorded_args == [("send-keys", "-t", "%1", "y", "Enter")]
+
+    async def test_send_raw_keys_empty_is_noop(
+        self, repo: Repository, monkeypatch,
+    ):
+        sm = SessionManager(repo)
+        called = []
+
+        async def fake_tmux(*args):
+            called.append(args)
+            return 0, "", ""
+
+        monkeypatch.setattr(sm, "_tmux", fake_tmux)
+        rc, _, _ = await sm.send_raw_keys("%1")
+        assert rc == 0
+        assert called == []
+
+    async def test_send_raw_keys_propagates_failure(
+        self, repo: Repository, monkeypatch,
+    ):
+        sm = SessionManager(repo)
+
+        async def fake_tmux(*args):
+            return 1, "", "no such pane"
+
+        monkeypatch.setattr(sm, "_tmux", fake_tmux)
+        rc, _, err = await sm.send_raw_keys("%99", "Up")
+        assert rc == 1
+        assert "no such pane" in err
+
+    async def test_capture_pane_full_ansi_flag_added(
+        self, repo: Repository, monkeypatch,
+    ):
+        """REQ-015 F-08: ansi=True must add the -e flag to the tmux call."""
+        sm = SessionManager(repo)
+        recorded_args: list[tuple] = []
+
+        async def fake_tmux(*args):
+            recorded_args.append(args)
+            return 0, "captured output", ""
+
+        monkeypatch.setattr(sm, "_tmux", fake_tmux)
+        await sm.capture_pane_full("%1", ansi=True)
+        # The args should contain "-e" before "-S"
+        args = recorded_args[0]
+        assert "capture-pane" in args
+        assert "-e" in args
+        assert "-S" in args
+
+    async def test_capture_pane_full_default_no_ansi_flag(
+        self, repo: Repository, monkeypatch,
+    ):
+        sm = SessionManager(repo)
+        recorded_args: list[tuple] = []
+
+        async def fake_tmux(*args):
+            recorded_args.append(args)
+            return 0, "", ""
+
+        monkeypatch.setattr(sm, "_tmux", fake_tmux)
+        await sm.capture_pane_full("%1")
+        args = recorded_args[0]
+        assert "-e" not in args
+
+    async def test_capture_pane_full_history_lines_param(
+        self, repo: Repository, monkeypatch,
+    ):
+        sm = SessionManager(repo)
+        recorded_args: list[tuple] = []
+
+        async def fake_tmux(*args):
+            recorded_args.append(args)
+            return 0, "", ""
+
+        monkeypatch.setattr(sm, "_tmux", fake_tmux)
+        await sm.capture_pane_full("%1", history_lines=5000)
+        args = recorded_args[0]
+        assert "-5000" in args
+
     async def test_prototype_workflow_renders_with_minimal_roster(
         self, repo: Repository,
     ):
