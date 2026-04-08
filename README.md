@@ -1,3 +1,7 @@
+[English](README.md) | [简体中文](README.zh-CN.md)
+
+---
+
 # Agent Orchestra
 
 > A local TUI that conducts a team of Claude Code CLI agents through automated software-delivery workflows. An LLM **Orchestrator** sits in the middle of five role-specialised worker agents (PM, Tech Director, Developer, Tester, User) and dispatches them via tmux — using the `/req-*` skill catalogue to drive the full `analyse → design → code → security → cleanup → review → verify → archive` pipeline.
